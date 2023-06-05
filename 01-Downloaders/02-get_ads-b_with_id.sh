@@ -1,0 +1,1 @@
+awk -F',' '{ if($3!=""){print $0} fi }' ../data/ads-b_extra.csv > ../data/ads-b_with_id.csv
