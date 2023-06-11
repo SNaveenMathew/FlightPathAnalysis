@@ -2,6 +2,6 @@ Basic requirements:
 Linux OS (ideally Ubuntu) with curl
 Anaconda
 python v3.11 (ideally a new environment)
-R v4.2.2
+R v4.2.0 (ideally installed using conda)
 jupyter
 R Studio (Posit)
