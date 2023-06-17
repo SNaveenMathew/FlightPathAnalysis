@@ -42,6 +42,20 @@ plot_aircraft_ids <- function(jfk_data1, a_region, min_lon, min_lat, max_lon, ma
   return(plot_ids)
 }
 
+# +
+most_frequent <- function(x, n = 1) {
+    tbl <- table(x)
+    tbl <- tbl[order(tbl, decreasing = T)]
+    return(names(tbl)[n])
+}
+
+most_frequent_percent <- function(x, n = 1) {
+    tbl <- table(x)
+    tbl <- tbl[order(tbl, decreasing = T)]
+    return(tbl[n] / length(x))
+}
+# -
+
 # plot_ac_instances <- function(landing_ac_data, wd = "clean_landed_id") {
 #   setwd(wd)
 #   uniq_aircraft <- unique(landing_ac_data$aircraft)
