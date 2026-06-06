@@ -6,22 +6,22 @@ ground_dist <- function(row) {
   distm (c(lat_start, lon_start), c(lat_end, lon_end), fun = distHaversine)
 }
 
-visualize_map <- function(ac_df, world, color_var = "id", sampl = T,
+visualize_map <- function(ac_df, a_region, color_var = "id", sampl = T,
                           min_lon = NULL, max_lon = NULL, min_lat = NULL, max_lat = NULL) {
-    ac_df$num_id <- as.integer(as.factor(ac_df$id))
+    ac_df$id <- sapply(strsplit(ac_df$aircraft_session_id, "_S"), function(x) x[2])
+    ac_df$num_id <- as.numeric(ac_df$id)
     ac_df <- split(ac_df, ac_df$num_id)
     if(sampl)
       ac_df <- ac_df[sample(x = 1:length(ac_df), size = n_aircraft, replace = F)]
     ac_df <- do.call(rbind, ac_df)
     ac_df <- ac_df[order(ac_df$ts), ]
     p <- ggplot() +
-      geom_sf(data = world) +
-      coord_sf(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat), expand = F) +
-      geom_path(data = ac_df, arrow = arrow(type = "closed", angle = 18,
-                                            length = unit(0.1, "inches")),
-                aes(x = lon, y = lat, frame = ts, color = id)) +
-      xlim(c(min_lon, max_lon)) +
-      ylim(c(min_lat, max_lat))
+      ggplot2::geom_polygon(data = a_region, aes(x = long, y = lat, group = group),
+                            fill = "white", color = "black") +
+      ggplot2::coord_quickmap(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat), expand = FALSE) +
+      ggplot2::geom_path(data = ac_df, arrow = arrow(type = "closed", angle = 18,
+                                                     length = unit(0.1, "inches")),
+                         aes(x = lon, y = lat, color = id))
     return(p)
 }
 
