@@ -5,3 +5,14 @@ data/*
 .ipynb_checkpoints/*
 */.ipynb_checkpoints/*
 */*/.ipynb_checkpoints/*
+
+# Python-generated files
+__pycache__/
+*.py[cod]
+
+# Local datasets and temporary scripts
+*.feather
+/tmp_*.py
+
+# IDE metadata
+.idea/
