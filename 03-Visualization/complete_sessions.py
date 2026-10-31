@@ -470,28 +470,127 @@ def occupancy_to_payload(
     }
 
 
+def continuous_sessions_to_payload(
+    df: pd.DataFrame,
+    session_ids: pd.Index | list[str],
+    summary: pd.DataFrame,
+    box: dict,
+    dt: float,
+    source: str | Path,
+) -> dict[str, Any]:
+    if not np.isfinite(dt) or dt <= 0:
+        raise ValueError("Bin width dt must be positive and finite")
+
+    columns = [
+        "aircraft_session_id",
+        "aircraft",
+        "aircraft_session_type",
+        "ts",
+        "lon",
+        "lat",
+        "altitude",
+    ]
+    selected = df.loc[df["aircraft_session_id"].isin(list(session_ids)), columns].copy()
+    selected = selected.dropna(subset=["ts", "lon", "lat", "altitude"])
+    selected = selected.sort_values(["aircraft_session_id", "ts"], kind="mergesort")
+    first_ts = selected.groupby("aircraft_session_id", sort=False)["ts"].transform("min")
+    selected["it"] = np.floor(
+        (selected["ts"] - first_ts) / (dt * 1000.0)
+    ).astype(np.int32)
+
+    sessions = []
+    for session_id, group in selected.groupby("aircraft_session_id", sort=False):
+        metadata = summary.loc[session_id]
+        points = [
+            [round(float(lon), 6), round(float(lat), 6), round(float(alt), 1), int(it)]
+            for lon, lat, alt, it in group[["lon", "lat", "altitude", "it"]].itertuples(
+                index=False, name=None
+            )
+        ]
+        sessions.append(
+            {
+                "id": str(session_id),
+                "aircraft": None
+                if pd.isna(group["aircraft"].iloc[0])
+                else str(group["aircraft"].iloc[0]),
+                "session_type": None
+                if pd.isna(group["aircraft_session_type"].iloc[0])
+                else str(group["aircraft_session_type"].iloc[0]),
+                "complete_kind": str(metadata["complete_kind"]),
+                "start_kind": str(metadata["start_kind"]),
+                "end_kind": str(metadata["end_kind"]),
+                "src": None if pd.isna(metadata["src"]) else str(metadata["src"]),
+                "dest": None if pd.isna(metadata["dest"]) else str(metadata["dest"]),
+                "t_max": int(points[-1][3]) if points else 0,
+                "n_points": len(points),
+                "points": points,
+            }
+        )
+
+    return {
+        "meta": {
+            "source_file": Path(source).name,
+            "sector": box,
+            "spatial_coordinates": "continuous lon/lat degrees and altitude feet",
+            "time_step_seconds": float(dt),
+            "n_sessions": len(sessions),
+            "n_points": sum(session["n_points"] for session in sessions),
+        },
+        "sessions": sessions,
+    }
+
+
+def export_session_payload(
+    df: pd.DataFrame,
+    source: str | Path,
+    session_ids: pd.Index | list[str],
+    summary: pd.DataFrame,
+    box: dict,
+    mode: str = "discrete",
+    bins: dict[str, float] | None = None,
+    out_path: str | Path | None = None,
+) -> tuple[Path, dict[str, Any]]:
+    if mode not in {"discrete", "continuous"}:
+        raise ValueError("mode must be either 'discrete' or 'continuous'")
+    bins = {**DEFAULT_BINS, **(bins or {})}
+
+    if mode == "discrete":
+        occupancy = discretize_sessions(df, session_ids, bins=bins, box=box)
+        payload = occupancy_to_payload(occupancy, summary, bins, box, str(source))
+        default_name = "complete_sessions.json"
+    else:
+        payload = continuous_sessions_to_payload(
+            df, session_ids, summary, box, bins["dt"], source
+        )
+        default_name = "continuous_sessions.json"
+
+    destination = (
+        Path(out_path)
+        if out_path is not None
+        else Path(__file__).resolve().parent / default_name
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, separators=(",", ":"), allow_nan=False)
+    return destination, payload["meta"]
+
+
 def export_complete_sessions(
     feather_path: str | Path | None = None,
     out_path: str | Path | None = None,
     bins: dict[str, float] | None = None,
     max_sessions: int | None = None,
     random_state: int = 0,
+    mode: str = "discrete",
 ) -> tuple[Path, pd.DataFrame, dict[str, Any]]:
-    bins = {**DEFAULT_BINS, **(bins or {})}
     df, source = load_adsb(feather_path)
     keep, summary, box = complete_session_ids(df)
     if max_sessions is not None and len(keep) > max_sessions:
         keep = summary.loc[keep].sample(n=max_sessions, random_state=random_state).index
-    occupancy = discretize_sessions(df, keep, bins=bins, box=box)
-    payload = occupancy_to_payload(occupancy, summary, bins, box, str(source))
-    if out_path is None:
-        out_path = Path(__file__).resolve().parent / "complete_sessions.json"
-    else:
-        out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, separators=(",", ":"), allow_nan=False)
-    return out_path, summary, payload["meta"]
+    output, meta = export_session_payload(
+        df, source, keep, summary, box, mode=mode, bins=bins, out_path=out_path
+    )
+    return output, summary, meta
 
 
 def completeness_counts(summary: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -524,15 +623,24 @@ def main() -> None:
     parser.add_argument("--input", type=Path, default=None, help="Preprocessed Feather file")
     parser.add_argument("--output", type=Path, default=None, help="Output JSON path")
     parser.add_argument("--max-sessions", type=int, default=None, help="Optional random session cap")
+    parser.add_argument(
+        "--mode",
+        choices=("discrete", "continuous"),
+        default="discrete",
+        help="Spatial output representation (default: discrete)",
+    )
     args = parser.parse_args()
     output, summary, meta = export_complete_sessions(
         feather_path=args.input,
         out_path=args.output,
         max_sessions=args.max_sessions,
+        mode=args.mode,
     )
     counts, drops = completeness_counts(summary)
-    print(f"Input: {meta['source']}")
-    print(f"Sector: {meta['sector']} ({meta['sector_source']})")
+    input_name = meta.get("source", meta.get("source_file", "unknown"))
+    sector_source = meta.get("sector_source", "preprocessor_config")
+    print(f"Input: {input_name}")
+    print(f"Sector: {meta['sector']} ({sector_source})")
     print(f"Complete sessions: {meta['n_sessions']:,}")
     print(counts.to_string(index=False))
     print("Dropped:")

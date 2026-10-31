@@ -33,16 +33,23 @@ prerequisites or alternatives.
    `02-Preprocessing/` before running the notebook, or update its input paths
    to point to `data/`.
 
-3. **Select and export complete sessions:** run
-   `03-Visualization/01-complete_sessions.ipynb`. It uses
-   `03-Visualization/complete_sessions.py`, reads the labeled Feather data,
-   and writes `complete_sessions.json`. The notebook also reports completeness
-   counts and plots sample session tracks.
+3. **Export complete-session data:** run
+   `03-Visualization/01-complete_sessions.ipynb`. Set `MODE` in the notebook to
+   `"discrete"` for binned `(x, y, z, t)` output (`complete_sessions.json`), or
+   `"continuous"` for continuous lon/lat/altitude with discretized time
+   (`continuous_sessions.json`). Both use the same completeness filter and
+   `BINS["dt"]` time-bin width. The notebook also reports completeness counts
+   and plots sample session tracks.
 
 4. **View the trajectories:** from `03-Visualization/`, start
-   `python -m http.server 8765`, then open
-   <http://127.0.0.1:8765/02-session_space_viz.html>. Load the generated
-   `complete_sessions.json` in the page if it is not fetched automatically.
+   `python -m http.server 8765`, then open either:
+   - <http://127.0.0.1:8765/02-session_space_viz.html> for discretized
+     `(x, y, z, t)`.
+   - <http://127.0.0.1:8765/02-session_space_viz_continuous.html> for
+     continuous `(x, y, z)` with discretized `t`.
+
+   Each page fetches its corresponding JSON by default; use its Load button
+   if automatic loading fails.
 
 This repository currently contains preprocessing and trajectory exploration,
 not an RL environment, policy, or training loop.
