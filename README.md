@@ -27,19 +27,31 @@ prerequisites or alternatives.
 
 2. **Label and preprocess sessions:** run
    `02-Preprocessing/01-label_aircraft_id.ipynb`. It reads `ads-b*.csv` and
-   `GlobalAirportDatabase.txt` from its working directory and writes
-   `full_ac_data.feather` and `ac_data_processed.feather` there. Therefore,
-   copy the downloaded CSV and airport database from `data/` into
-   `02-Preprocessing/` before running the notebook, or update its input paths
-   to point to `data/`.
+   `GlobalAirportDatabase.txt` from `../data` when run from `02-Preprocessing/`
+   and writes
+   `full_ac_data.feather` and `ac_data_processed.feather` there. It preserves
+   reported altitude separately from derived ground/phase values and adds
+   per-sample QC flags for long gaps, invalid coordinates/altitudes, and
+   position/altitude jumps. Suspect points are flagged rather than silently
+   deleted or interpolated. A `track_segment_id` marks gaps over 120 seconds;
+   this is separate from the aircraft session labels. The downloader outputs
+   should be present in the repository's `data/` directory.
 
 3. **Export complete-session data:** run
    `03-Visualization/01-complete_sessions.ipynb`. Set `MODE` in the notebook to
    `"discrete"` for binned `(x, y, z, t)` output (`complete_sessions.json`), or
    `"continuous"` for continuous lon/lat/altitude with discretized time
-   (`continuous_sessions.json`). Both use the same completeness filter and
-   `BINS["dt"]` time-bin width. The notebook also reports completeness counts
-   and plots sample session tracks.
+   (`continuous_sessions.json`). Both use the same S1–S4 completeness filter and
+   `BINS["dt"]` time-bin width. S1 is local takeoff-and-landing; S2/S3/S4 map to
+   arrival, departure, and airborne transit candidates. Non-local endpoints are
+   inferred from the existing session labels when edge samples are unavailable;
+   the current collection has no samples in the configured edge bands. Sessions
+   clipped at the collection limits, parked/ground-only S4 tracks, event-label
+   mismatches, same-ID re-entries, and tracks with fewer than two valid in-sector
+   points are excluded. The notebook reports counts and plots sample tracks.
+   Exported trajectories contain only in-sector points and set `t=0` at the
+   first retained sample. QC flags are summarized but do not otherwise exclude
+   sessions.
 
 4. **View the trajectories:** from `03-Visualization/`, start
    `python -m http.server 8765`, then open either:
