@@ -1,4 +1,4 @@
-"""Filter geometrically complete aircraft sessions and discretize (x, y, z, t)."""
+"""Filter complete S1–S4 aircraft sessions and discretize (x, y, z, t)."""
 
 from __future__ import annotations
 
@@ -22,11 +22,23 @@ SECTOR = {
     "lon_range": 0.5,
 }
 DEFAULT_BINS = {"dx": 0.05, "dy": 0.05, "dz": 500.0, "dt": 5.0}
-MIN_PTS_PER_SESSION = 20
+MIN_PTS_PER_SESSION = 2
 CLIP_TOLERANCE_MS = 60_000
+
+QC_FLAG_COLUMNS = (
+    "track_gap_flag",
+    "position_invalid_flag",
+    "altitude_invalid_flag",
+    "altitude_range_flag",
+    "position_jump_suspect_flag",
+    "altitude_jump_suspect_flag",
+    "altitude_spike_suspect_flag",
+    "altitude_ceiling_flag",
+)
 
 NEEDED_COLS = [
     "aircraft",
+    "id",
     "aircraft_session_id",
     "aircraft_session_type",
     "n_to_session",
@@ -37,6 +49,20 @@ NEEDED_COLS = [
     "lon",
     "lat",
     "altitude",
+    "altitude_raw_ft",
+    "altitude_phase_ft",
+    "ground_flag",
+    "track_segment_id",
+    "sample_gap_ms",
+    "quality_flag_count",
+    "track_gap_flag",
+    "position_invalid_flag",
+    "altitude_invalid_flag",
+    "altitude_range_flag",
+    "position_jump_suspect_flag",
+    "altitude_jump_suspect_flag",
+    "altitude_spike_suspect_flag",
+    "altitude_ceiling_flag",
     "takeoff_in_sector",
     "touchdown_in_sector",
     "takeoff",
@@ -48,6 +74,31 @@ COMPLETE_KIND = {
     ("S_TO", "E_EDGE"): "departure",
     ("S_EDGE", "E_LD"): "arrival",
     ("S_EDGE", "E_EDGE"): "transit",
+}
+
+SESSION_TYPE_KIND = {
+    "S1": "local",
+    "S2": "arrival",
+    "S3": "departure",
+    "S4": "transit",
+}
+SESSION_TYPE_ENDPOINTS = {
+    "S1": ("S_TO", "E_LD"),
+    "S2": ("S_TRACK_START", "E_LD"),
+    "S3": ("S_TO", "E_TRACK_END"),
+    "S4": ("S_TRACK_START", "E_TRACK_END"),
+}
+SESSION_TYPE_EVENTS = {
+    "S1": (True, True),
+    "S2": (False, True),
+    "S3": (True, False),
+    "S4": (False, False),
+}
+COMPLETENESS_BASIS = {
+    "local": "S1: in-sector takeoff and landing events",
+    "arrival": "S2: landing event; inbound track start inferred",
+    "departure": "S3: takeoff event; sector exit inferred from track end",
+    "transit": "S4: no takeoff/landing; airborne pass-through inferred",
 }
 
 
@@ -100,10 +151,17 @@ def load_adsb(feather_path: str | Path | None = None) -> tuple[pd.DataFrame, Pat
         raise ValueError(f"{path} is missing required columns: {sorted(missing)}")
     cols = [column for column in NEEDED_COLS if column in names]
     df = feather.read_table(path, columns=cols, memory_map=False).to_pandas()
-    for column in ("ts", "lon", "lat", "altitude", "n_to_session", "n_ld_session"):
+    for column in (
+        "ts", "lon", "lat", "altitude", "altitude_raw_ft",
+        "altitude_phase_ft", "sample_gap_ms",
+        "quality_flag_count", "n_to_session", "n_ld_session"
+    ):
         if column in df.columns:
             df[column] = pd.to_numeric(df[column], errors="coerce")
-    for flag in ("takeoff_in_sector", "touchdown_in_sector", "takeoff", "touchdown"):
+    for flag in (
+        "takeoff_in_sector", "touchdown_in_sector", "takeoff", "touchdown",
+        *QC_FLAG_COLUMNS,
+    ):
         if flag in df.columns:
             df[flag] = df[flag].fillna(False).astype(bool)
         else:
@@ -163,18 +221,53 @@ def _session_summaries(df: pd.DataFrame, box: dict) -> pd.DataFrame:
         "takeoff",
         "touchdown",
         "ground_flag",
+        "track_segment_id",
+        "quality_flag_count",
+        *QC_FLAG_COLUMNS,
         "session_src_airport",
         "session_dest_airport",
     ):
         if column not in work.columns:
-            work[column] = 0 if column in {"n_to_session", "n_ld_session"} else (
-                False if column in {"takeoff_in_sector", "touchdown_in_sector", "takeoff", "touchdown", "ground_flag"} else pd.NA
+            work[column] = 0 if column in {
+                "n_to_session", "n_ld_session", "quality_flag_count"
+            } else (
+                False if column in {
+                    "takeoff_in_sector", "touchdown_in_sector", "takeoff",
+                    "touchdown", "ground_flag", *QC_FLAG_COLUMNS
+                } else pd.NA
             )
+    for column in ("altitude", "altitude_phase_ft"):
+        if column not in work.columns:
+            work[column] = np.nan
+    for column in (
+        "takeoff_in_sector", "touchdown_in_sector", "takeoff", "touchdown",
+        "ground_flag", *QC_FLAG_COLUMNS,
+    ):
+        work[column] = work[column].astype("boolean").fillna(False).astype(bool)
     work = work.dropna(subset=["ts"]).sort_values(
         ["aircraft_session_id", "ts"], kind="mergesort"
     )
     work["in_bbox"] = in_box(work["lat"].to_numpy(), work["lon"].to_numpy(), box)
     work["on_edge"] = on_edge_band(work["lat"].to_numpy(), work["lon"].to_numpy(), box)
+
+    raw_altitude = pd.to_numeric(work["altitude"], errors="coerce")
+    phase_altitude = pd.to_numeric(work["altitude_phase_ft"], errors="coerce")
+    work["_altitude_for_completeness"] = phase_altitude.where(
+        phase_altitude.notna(), raw_altitude
+    )
+    invalid_altitude = pd.Series(False, index=work.index)
+    for flag in (
+        "altitude_invalid_flag", "altitude_range_flag", "altitude_ceiling_flag"
+    ):
+        invalid_altitude |= work[flag]
+    work.loc[invalid_altitude, "_altitude_for_completeness"] = np.nan
+    work["_valid_track_point"] = (
+        work["in_bbox"]
+        & np.isfinite(pd.to_numeric(work["ts"], errors="coerce"))
+        & np.isfinite(pd.to_numeric(work["lon"], errors="coerce"))
+        & np.isfinite(pd.to_numeric(work["lat"], errors="coerce"))
+        & work["_altitude_for_completeness"].notna()
+    )
 
     prev_in = work.groupby("aircraft_session_id", sort=False)["in_bbox"].shift(1)
     prev_in = prev_in.astype("boolean").fillna(False).astype(bool)
@@ -201,12 +294,25 @@ def _session_summaries(df: pd.DataFrame, box: dict) -> pd.DataFrame:
         raw_to=("takeoff", "any"),
         raw_ld=("touchdown", "any"),
         max_alt=("altitude", "max"),
+        max_valid_alt=("_altitude_for_completeness", "max"),
+        n_valid_points=("_valid_track_point", "sum"),
         min_alt=("altitude", "min"),
         ground_only=("ground_flag", "all"),
         first_session_alt=("altitude", "first"),
         last_session_alt=("altitude", "last"),
         src=("session_src_airport", "first"),
         dest=("session_dest_airport", "first"),
+        quality_flag_events=("quality_flag_count", "sum"),
+        quality_flagged_points=("quality_flag_count", lambda values: int((values > 0).sum())),
+        n_track_segments=("track_segment_id", "nunique"),
+        track_gap_points=("track_gap_flag", "sum"),
+        position_invalid_points=("position_invalid_flag", "sum"),
+        position_jump_points=("position_jump_suspect_flag", "sum"),
+        altitude_invalid_points=("altitude_invalid_flag", "sum"),
+        altitude_range_points=("altitude_range_flag", "sum"),
+        altitude_jump_points=("altitude_jump_suspect_flag", "sum"),
+        altitude_spike_points=("altitude_spike_suspect_flag", "sum"),
+        altitude_ceiling_points=("altitude_ceiling_flag", "sum"),
     )
     point_summary = pd.DataFrame(
         {
@@ -216,6 +322,8 @@ def _session_summaries(df: pd.DataFrame, box: dict) -> pd.DataFrame:
             "first_lon": first["lon"].to_numpy(),
             "last_lat": last["lat"].to_numpy(),
             "last_lon": last["lon"].to_numpy(),
+            "ts_first_bbox": first["ts"].to_numpy(),
+            "ts_last_bbox": last["ts"].to_numpy(),
             "first_alt": first_all["altitude"].reindex(first.index).to_numpy(),
             "last_alt": last_all["altitude"].reindex(first.index).to_numpy(),
             "n_in_bbox": inb.groupby("aircraft_session_id", sort=False).size().to_numpy(),
@@ -223,16 +331,9 @@ def _session_summaries(df: pd.DataFrame, box: dict) -> pd.DataFrame:
         index=first.index,
     )
     out = agg.join(point_summary, how="inner")
-    out["has_to"] = (
-        (out["n_to"].fillna(0) > 0)
-        | out["flag_to"].fillna(False)
-        | out["raw_to"].fillna(False)
-    )
-    out["has_ld"] = (
-        (out["n_ld"].fillna(0) > 0)
-        | out["flag_ld"].fillna(False)
-        | out["raw_ld"].fillna(False)
-    )
+    # Session event counts exclude the merge buffer; per-row flags may not.
+    out["has_to"] = out["n_to"].fillna(0) > 0
+    out["has_ld"] = out["n_ld"].fillna(0) > 0
     out["n_bbox_runs"] = n_runs.reindex(out.index).fillna(0).astype(int)
     out["first_on_edge"] = out["first_on_edge"].fillna(False).astype(bool)
     out["last_on_edge"] = out["last_on_edge"].fillna(False).astype(bool)
@@ -244,84 +345,96 @@ def classify_complete(
     summary: pd.DataFrame,
     ts_global_min: float,
     ts_global_max: float,
+    min_points: int = MIN_PTS_PER_SESSION,
 ) -> pd.DataFrame:
+    if not isinstance(min_points, int) or min_points < 2:
+        raise ValueError("min_points must be an integer of at least 2")
     s = summary.copy()
     if s.empty:
         s["start_kind"] = pd.Series(dtype=str)
         s["end_kind"] = pd.Series(dtype=str)
         s["complete_kind"] = pd.Series(dtype=str)
+        s["completeness_basis"] = pd.Series(dtype=str)
         s["drop_reason"] = pd.Series(dtype=str)
         s["is_complete"] = pd.Series(dtype=bool)
         return s
 
-    has_src_airport = s["src"].fillna("").astype(str).str.strip().ne("")
-    has_dest_airport = s["dest"].fillna("").astype(str).str.strip().ne("")
-    has_airport_takeoff = (
-        has_src_airport
-        & (s["raw_to"].fillna(False) | (s["first_alt"].fillna(0) <= 1000))
-        & s["session_type"].isin(["S1", "S3"])
-    )
-    has_airport_landing = (
-        has_dest_airport
-        & (s["raw_ld"].fillna(False) | (s["last_alt"].fillna(0) <= 1000))
-        & s["session_type"].isin(["S1", "S2"])
-    )
-    s["airport_start"] = has_airport_takeoff
-    s["airport_end"] = has_airport_landing
+    has_to = s["has_to"].fillna(False).astype(bool)
+    has_ld = s["has_ld"].fillna(False).astype(bool)
+    session_type = s.get(
+        "session_type", pd.Series(pd.NA, index=s.index, dtype="object")
+    ).fillna("").astype(str)
+    known_type = session_type.isin(SESSION_TYPE_KIND)
 
-    start = np.where(
-        s["has_to"] | has_airport_takeoff,
+    legacy_start = np.where(
+        has_to,
         "S_TO",
-        np.where(
-            has_airport_landing & (s["ts_first"] > ts_global_min + CLIP_TOLERANCE_MS),
-            "S_EDGE",
-            np.where(s["first_on_edge"], "S_EDGE", "S_TRUNC"),
-        ),
+        np.where(s["first_on_edge"], "S_EDGE", "S_TRUNC"),
     )
-    end = np.where(
-        s["has_ld"] | has_airport_landing,
+    legacy_end = np.where(
+        has_ld,
         "E_LD",
-        np.where(
-            has_airport_takeoff & (s["ts_last"] < ts_global_max - CLIP_TOLERANCE_MS),
-            "E_EDGE",
-            np.where(s["last_on_edge"], "E_EDGE", "E_TRUNC"),
-        ),
+        np.where(s["last_on_edge"], "E_EDGE", "E_TRUNC"),
     )
-    s["start_kind"] = start
-    s["end_kind"] = end
-    s["complete_kind"] = [
-        COMPLETE_KIND.get((a, b), "incomplete") for a, b in zip(s["start_kind"], s["end_kind"])
-    ]
+    legacy_kind = pd.Series(
+        [COMPLETE_KIND.get((a, b), "incomplete") for a, b in zip(legacy_start, legacy_end)],
+        index=s.index,
+    )
 
-    returned = (s["end_kind"] == "E_EDGE") & (s["n_bbox_runs"] > 1)
-    too_short = s["n_pts"] < MIN_PTS_PER_SESSION
-    no_bbox = s["n_in_bbox"] < 2
+    expected_events = pd.Series(True, index=s.index)
+    for kind, (expected_to, expected_ld) in SESSION_TYPE_EVENTS.items():
+        mask = session_type.eq(kind)
+        expected_events.loc[mask] = has_to.loc[mask].eq(expected_to) & has_ld.loc[mask].eq(expected_ld)
+    type_mismatch = known_type & ~expected_events
+
+    mapped_kind = session_type.map(SESSION_TYPE_KIND)
+    s["complete_kind"] = mapped_kind.where(known_type, legacy_kind)
+    s.loc[type_mismatch, "complete_kind"] = "incomplete"
+
+    mapped_endpoints = session_type.map(SESSION_TYPE_ENDPOINTS)
+    mapped_start = mapped_endpoints.map(lambda pair: pair[0] if isinstance(pair, tuple) else pd.NA)
+    mapped_end = mapped_endpoints.map(lambda pair: pair[1] if isinstance(pair, tuple) else pd.NA)
+    mapped_start = mapped_start.mask(
+        mapped_start.eq("S_TRACK_START") & s["first_on_edge"], "S_EDGE"
+    )
+    mapped_end = mapped_end.mask(
+        mapped_end.eq("E_TRACK_END") & s["last_on_edge"], "E_EDGE"
+    )
+    s["start_kind"] = mapped_start.where(known_type, pd.Series(legacy_start, index=s.index))
+    s["end_kind"] = mapped_end.where(known_type, pd.Series(legacy_end, index=s.index))
+    s["completeness_basis"] = s["complete_kind"].map(COMPLETENESS_BASIS).fillna(
+        "observed takeoff/landing or sector-edge evidence"
+    )
+
+    n_valid_points = pd.to_numeric(
+        s.get("n_valid_points", s["n_pts"]), errors="coerce"
+    ).fillna(0)
+    n_in_bbox = pd.to_numeric(s["n_in_bbox"], errors="coerce").fillna(0)
+    n_bbox_runs = pd.to_numeric(
+        s.get("n_bbox_runs", pd.Series(1, index=s.index)), errors="coerce"
+    ).fillna(0)
+    max_valid_alt = pd.to_numeric(
+        s.get("max_valid_alt", s["max_alt"]), errors="coerce"
+    )
+
+    too_short = n_valid_points < min_points
+    no_bbox = n_in_bbox < 2
+    returned = s["complete_kind"].isin(["departure", "transit"]) & n_bbox_runs.gt(1)
     parked = (
-        ~s["has_to"]
-        & ~s["has_ld"]
-        & ~has_airport_takeoff
-        & ~has_airport_landing
-        & ~s["first_on_edge"]
-        & ~s["last_on_edge"]
+        ~has_to
+        & ~has_ld
         & (
-            s["ground_only"].fillna(False)
-            | (s["max_alt"].fillna(0) < 2000)
+            s["ground_only"].fillna(False).astype(bool)
+            | max_valid_alt.fillna(0).lt(2000)
         )
     )
-    clip_open = (
-        ~s["has_to"]
-        & ~has_airport_takeoff
-        & (s["ts_first"] <= ts_global_min + CLIP_TOLERANCE_MS)
-    )
-    clip_close = (
-        ~s["has_ld"]
-        & ~has_airport_landing
-        & (s["ts_last"] >= ts_global_max - CLIP_TOLERANCE_MS)
-    )
+    clip_open = ~has_to & (s["ts_first"] <= ts_global_min + CLIP_TOLERANCE_MS)
+    clip_close = ~has_ld & (s["ts_last"] >= ts_global_max - CLIP_TOLERANCE_MS)
 
     reason = np.full(len(s), "", dtype=object)
     reason = np.where(too_short, "too_few_points", reason)
     reason = np.where((reason == "") & no_bbox, "no_in_sector_track", reason)
+    reason = np.where((reason == "") & type_mismatch, "session_type_event_mismatch", reason)
     reason = np.where((reason == "") & returned, "session_returned", reason)
     reason = np.where((reason == "") & parked, "parked_or_ground", reason)
     reason = np.where((reason == "") & clip_open, "clipped_collection_start", reason)
@@ -335,17 +448,69 @@ def classify_complete(
 def complete_session_ids(
     df: pd.DataFrame,
     box: dict | None = None,
+    min_points: int = MIN_PTS_PER_SESSION,
 ) -> tuple[pd.Index, pd.DataFrame, dict]:
     if box is None:
         box = coverage_box(df)
+    all_ts = pd.to_numeric(df["ts"], errors="coerce").dropna()
     labeled_ts = df.loc[df["aircraft_session_id"].notna(), "ts"].dropna()
-    if labeled_ts.empty:
+    if labeled_ts.empty or all_ts.empty:
         raise ValueError("No non-null aircraft_session_id / ts rows found")
     summary = classify_complete(
-        _session_summaries(df, box), float(labeled_ts.min()), float(labeled_ts.max())
+        _session_summaries(df, box),
+        float(all_ts.min()),
+        float(all_ts.max()),
+        min_points=min_points,
     )
     keep = summary.index[summary["is_complete"]]
     return keep, summary, box
+
+
+def _trajectory_rows(
+    df: pd.DataFrame,
+    session_ids: pd.Index | list[str],
+    box: dict,
+) -> pd.DataFrame:
+    columns = [
+        "aircraft",
+        "aircraft_session_id",
+        "aircraft_session_type",
+        "ts",
+        "lon",
+        "lat",
+        "altitude",
+        "altitude_phase_ft",
+        "altitude_invalid_flag",
+        "altitude_range_flag",
+        "altitude_ceiling_flag",
+    ]
+    available = [column for column in columns if column in df.columns]
+    selected = df.loc[
+        df["aircraft_session_id"].isin(list(session_ids)), available
+    ].copy()
+    selected = selected.loc[in_box(selected["lat"], selected["lon"], box)].copy()
+    for column in ("aircraft", "aircraft_session_type"):
+        if column not in selected.columns:
+            selected[column] = pd.NA
+
+    invalid_altitude = pd.Series(False, index=selected.index)
+    for flag in (
+        "altitude_invalid_flag",
+        "altitude_range_flag",
+        "altitude_ceiling_flag",
+    ):
+        if flag in selected.columns:
+            invalid_altitude |= selected[flag].fillna(False).astype(bool)
+    selected = selected.loc[~invalid_altitude].copy()
+
+    if "altitude_phase_ft" in selected.columns:
+        phase_altitude = pd.to_numeric(selected["altitude_phase_ft"], errors="coerce")
+        raw_altitude = pd.to_numeric(selected["altitude"], errors="coerce")
+        selected["altitude"] = phase_altitude.combine_first(raw_altitude)
+    selected = selected.dropna(subset=["ts", "lon", "lat", "altitude"])
+    return selected.sort_values(
+        ["aircraft_session_id", "ts"], kind="mergesort"
+    )
 
 
 def discretize_sessions(
@@ -360,22 +525,7 @@ def discretize_sessions(
     for name, width in bins.items():
         if not np.isfinite(width) or width <= 0:
             raise ValueError(f"Bin width {name} must be positive and finite")
-    cols = [
-        "aircraft",
-        "aircraft_session_id",
-        "aircraft_session_type",
-        "ts",
-        "lon",
-        "lat",
-        "altitude",
-    ]
-    available = [col for col in cols if col in df.columns]
-    sub = df.loc[df["aircraft_session_id"].isin(list(session_ids)), available].copy()
-    for col in ("aircraft", "aircraft_session_type"):
-        if col not in sub.columns:
-            sub[col] = pd.NA
-    sub = sub.dropna(subset=["ts", "lon", "lat", "altitude"])
-    sub = sub.sort_values(["aircraft_session_id", "ts"], kind="mergesort")
+    sub = _trajectory_rows(df, session_ids, box)
     t0 = sub.groupby("aircraft_session_id")["ts"].transform("min")
     sub["t_rel"] = (sub["ts"] - t0) / 1000.0
     sub["ix"] = np.floor((sub["lon"] - box["lon_min"]) / bins["dx"]).astype(np.int32)
@@ -416,6 +566,31 @@ def voxel_index(occ: pd.DataFrame) -> dict[tuple[int, int, int], list[dict[str, 
     return dict(index)
 
 
+QUALITY_SUMMARY_FIELDS = (
+    "quality_flag_events",
+    "quality_flagged_points",
+    "n_track_segments",
+    "track_gap_points",
+    "position_invalid_points",
+    "position_jump_points",
+    "altitude_invalid_points",
+    "altitude_range_points",
+    "altitude_jump_points",
+    "altitude_spike_points",
+    "altitude_ceiling_points",
+)
+
+
+def _quality_payload(summary_row: pd.Series | None) -> dict[str, int]:
+    if summary_row is None:
+        return {field: 0 for field in QUALITY_SUMMARY_FIELDS}
+    result = {}
+    for field in QUALITY_SUMMARY_FIELDS:
+        value = summary_row.get(field, 0)
+        result[field] = 0 if pd.isna(value) else int(value)
+    return result
+
+
 def occupancy_to_payload(
     occ: pd.DataFrame,
     summary: pd.DataFrame,
@@ -447,8 +622,18 @@ def occupancy_to_payload(
                 "complete_kind": None if meta is None else str(meta["complete_kind"]),
                 "start_kind": None if meta is None else str(meta["start_kind"]),
                 "end_kind": None if meta is None else str(meta["end_kind"]),
+                "completeness_basis": None
+                if meta is None
+                else str(meta["completeness_basis"]),
+                "edge_evidence": None
+                if meta is None
+                else {
+                    "start": bool(meta.get("first_on_edge", False)),
+                    "end": bool(meta.get("last_on_edge", False)),
+                },
                 "src": None if meta is None or pd.isna(meta["src"]) else str(meta["src"]),
                 "dest": None if meta is None or pd.isna(meta["dest"]) else str(meta["dest"]),
+                "quality": _quality_payload(meta),
                 "t_max": float(group["t"].max()),
                 "n_occ": int(len(group)),
                 "occ": session_occ.tolist(),
@@ -481,18 +666,7 @@ def continuous_sessions_to_payload(
     if not np.isfinite(dt) or dt <= 0:
         raise ValueError("Bin width dt must be positive and finite")
 
-    columns = [
-        "aircraft_session_id",
-        "aircraft",
-        "aircraft_session_type",
-        "ts",
-        "lon",
-        "lat",
-        "altitude",
-    ]
-    selected = df.loc[df["aircraft_session_id"].isin(list(session_ids)), columns].copy()
-    selected = selected.dropna(subset=["ts", "lon", "lat", "altitude"])
-    selected = selected.sort_values(["aircraft_session_id", "ts"], kind="mergesort")
+    selected = _trajectory_rows(df, session_ids, box)
     first_ts = selected.groupby("aircraft_session_id", sort=False)["ts"].transform("min")
     selected["it"] = np.floor(
         (selected["ts"] - first_ts) / (dt * 1000.0)
@@ -519,8 +693,14 @@ def continuous_sessions_to_payload(
                 "complete_kind": str(metadata["complete_kind"]),
                 "start_kind": str(metadata["start_kind"]),
                 "end_kind": str(metadata["end_kind"]),
+                "completeness_basis": str(metadata["completeness_basis"]),
+                "edge_evidence": {
+                    "start": bool(metadata.get("first_on_edge", False)),
+                    "end": bool(metadata.get("last_on_edge", False)),
+                },
                 "src": None if pd.isna(metadata["src"]) else str(metadata["src"]),
                 "dest": None if pd.isna(metadata["dest"]) else str(metadata["dest"]),
+                "quality": _quality_payload(metadata),
                 "t_max": int(points[-1][3]) if points else 0,
                 "n_points": len(points),
                 "points": points,
@@ -556,13 +736,48 @@ def export_session_payload(
 
     if mode == "discrete":
         occupancy = discretize_sessions(df, session_ids, bins=bins, box=box)
-        payload = occupancy_to_payload(occupancy, summary, bins, box, str(source))
+        payload = occupancy_to_payload(occupancy, summary, bins, box, Path(source).name)
         default_name = "complete_sessions.json"
     else:
         payload = continuous_sessions_to_payload(
             df, session_ids, summary, box, bins["dt"], source
         )
         default_name = "continuous_sessions.json"
+
+    selected_summary = summary.reindex(pd.Index(session_ids))
+    payload["meta"]["n_sessions_by_kind"] = {
+        str(kind): int(count)
+        for kind, count in selected_summary["complete_kind"].value_counts().items()
+    }
+    payload["meta"]["completeness"] = {
+        "basis": "preprocessed S1-S4 session labels, cross-checked against event counts and track evidence",
+        "edge_note": (
+            "The configured edge bands have no observations in this source data. "
+            "For S2/S3/S4, the inbound/outbound/pass-through interpretation comes "
+            "from the existing session labels and observed track boundaries, not "
+            "from direct edge-band crossings."
+        ),
+        "types": COMPLETENESS_BASIS,
+        "filters": [
+            "event signature agrees with S1-S4 label",
+            "at least the configured number of valid in-sector track points",
+            "not clipped at the collection start or end when a track endpoint is unobserved",
+            "S4 sessions must show airborne altitude and not be ground-only",
+            "reject S3/S4 sessions that re-enter the sector under the same session ID",
+        ],
+    }
+    if "quality_flagged_points" in selected_summary.columns:
+        flagged_points = selected_summary["quality_flagged_points"].fillna(0)
+        flag_events = selected_summary["quality_flag_events"].fillna(0)
+        payload["meta"]["quality"] = {
+            "filtering": (
+                "QC flags do not drop sessions; invalid, out-of-range, and "
+                "above-ceiling altitude samples are omitted from trajectory coordinates"
+            ),
+            "sessions_with_flags": int((flagged_points > 0).sum()),
+            "flagged_points": int(flagged_points.sum()),
+            "flag_events": int(flag_events.sum()),
+        }
 
     destination = (
         Path(out_path)
@@ -582,9 +797,10 @@ def export_complete_sessions(
     max_sessions: int | None = None,
     random_state: int = 0,
     mode: str = "discrete",
+    min_points: int = MIN_PTS_PER_SESSION,
 ) -> tuple[Path, pd.DataFrame, dict[str, Any]]:
     df, source = load_adsb(feather_path)
-    keep, summary, box = complete_session_ids(df)
+    keep, summary, box = complete_session_ids(df, min_points=min_points)
     if max_sessions is not None and len(keep) > max_sessions:
         keep = summary.loc[keep].sample(n=max_sessions, random_state=random_state).index
     output, meta = export_session_payload(
@@ -624,6 +840,12 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=None, help="Output JSON path")
     parser.add_argument("--max-sessions", type=int, default=None, help="Optional random session cap")
     parser.add_argument(
+        "--min-points",
+        type=int,
+        default=MIN_PTS_PER_SESSION,
+        help="Minimum valid in-sector samples per session (default: 2; QC flags are reported)",
+    )
+    parser.add_argument(
         "--mode",
         choices=("discrete", "continuous"),
         default="discrete",
@@ -635,6 +857,7 @@ def main() -> None:
         out_path=args.output,
         max_sessions=args.max_sessions,
         mode=args.mode,
+        min_points=args.min_points,
     )
     counts, drops = completeness_counts(summary)
     input_name = meta.get("source", meta.get("source_file", "unknown"))
