@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from complete_sessions import (
     MIN_PTS_PER_SESSION,
+    _airport_locations,
     classify_complete,
     complete_session_ids,
     continuous_sessions_to_payload,
@@ -19,6 +20,16 @@ from complete_sessions import (
 
 
 class CompleteSessionFilterTests(unittest.TestCase):
+    def test_airport_locations_use_exported_iata_codes(self):
+        fields = ["KJFK", "JFK"] + ["unused"] * 12 + ["40.6413", "-73.7781"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "airports.txt"
+            database.write_text(":".join(fields) + "\n", encoding="utf-8")
+
+            locations = _airport_locations({"jfk", "missing"}, database)
+
+        self.assertEqual(locations, {"JFK": {"lat": 40.6413, "lon": -73.7781}})
+
     def setUp(self):
         self.summary = pd.DataFrame(
             {

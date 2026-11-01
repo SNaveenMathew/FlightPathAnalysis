@@ -10,6 +10,7 @@
   const mapBase = document.createElement('canvas');
   const baseContext = mapBase.getContext('2d');
   const slider = document.getElementById('scrubber');
+  const autoFrameButton = document.getElementById('auto-frame');
   const timeLabel = document.getElementById('time');
   const status = document.getElementById('status');
   const speedNote = document.getElementById('speed-note');
@@ -21,7 +22,7 @@
   const destinationFilter = document.getElementById('destination-airport');
   const toleranceSelector = document.querySelector('#route-tolerance, #tolerance');
   const kindInputs = [...document.querySelectorAll('#filters input[data-kind]')];
-  const state = { t: 0, max: 0, speed: 4, playing: false, lastFrame: 0 };
+  const state = { t: 0, max: 0, speed: 4, playing: false, lastFrame: 0, autoFrame: true };
   const sessions = [];
   const categoryColors = {
     arrival: '#4ecdc4',
@@ -37,8 +38,11 @@
   let origin = { lon: -73, lat: 40 };
   let kmPerLon = 111.32 * Math.cos((origin.lat * Math.PI) / 180);
   const kmPerLat = 111.32;
-  let geoBounds = { lonMin: -78, lonMax: -68, latMin: 35, latMax: 45 };
   let worldBounds = null;
+  let mapBaseTransform = null;
+  let mapView = { x: 0, y: 0, zoom: 1 };
+  let cameraFrame = { center: [0, 0, 0], zoom: 1, initialized: false };
+  let airportAnchors = { src: new Map(), dest: new Map() };
   let renderer;
   let scene;
   let camera;
@@ -156,6 +160,22 @@
     if (worldBounds.xmin === worldBounds.xmax) worldBounds.xmax += 1;
     if (worldBounds.ymin === worldBounds.ymax) worldBounds.ymax += 1;
     if (worldBounds.zmin === worldBounds.zmax) worldBounds.zmax += 1;
+    updateMapBaseTransform();
+  }
+
+  function updateMapBaseTransform() {
+    if (!worldBounds || !map.width || !map.height) return;
+    const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+    const padding = 38 * pixelRatio;
+    const scale = Math.min(
+      (map.width - 2 * padding) / (worldBounds.xmax - worldBounds.xmin),
+      (map.height - 2 * padding) / (worldBounds.ymax - worldBounds.ymin),
+    );
+    mapBaseTransform = {
+      x: (worldBounds.xmin + worldBounds.xmax) / 2,
+      y: (worldBounds.ymin + worldBounds.ymax) / 2,
+      scale,
+    };
   }
 
   function worldTransform() {
@@ -167,21 +187,21 @@
     return { cx, cy, cz, scale, verticalScale: scale * 10 };
   }
 
-  function mapPosition(lon, lat) {
-    const padding = 38;
-    const width = map.width;
-    const height = map.height;
-    const scale = Math.min(
-      (width - 2 * padding) / (geoBounds.lonMax - geoBounds.lonMin || 1),
-      (height - 2 * padding) / (geoBounds.latMax - geoBounds.latMin || 1),
-    );
-    const drawnWidth = (geoBounds.lonMax - geoBounds.lonMin) * scale;
-    const drawnHeight = (geoBounds.latMax - geoBounds.latMin) * scale;
-    const left = (width - drawnWidth) / 2;
-    const top = (height - drawnHeight) / 2;
+  function mapBasePosition(lon, lat) {
+    const world = geoWorld(lon, lat, 0);
+    if (!mapBaseTransform) return { x: 0, y: 0 };
     return {
-      x: left + (lon - geoBounds.lonMin) * scale,
-      y: height - top - (lat - geoBounds.latMin) * scale,
+      x: map.width / 2 + (world[0] - mapBaseTransform.x) * mapBaseTransform.scale,
+      y: map.height / 2 - (world[1] - mapBaseTransform.y) * mapBaseTransform.scale,
+    };
+  }
+
+  function mapPosition(world) {
+    if (!mapBaseTransform) return { x: 0, y: 0 };
+    const scale = mapBaseTransform.scale * mapView.zoom;
+    return {
+      x: map.width / 2 + (world[0] - mapView.x) * scale,
+      y: map.height / 2 - (world[1] - mapView.y) * scale,
     };
   }
 
@@ -196,8 +216,8 @@
     context.stroke();
   }
 
-  function profileToMap(point) {
-    return mapPosition(
+  function profileToBaseMap(point) {
+    return mapBasePosition(
       origin.lon + point[0] / kmPerLon,
       origin.lat + point[1] / kmPerLat,
     );
@@ -221,25 +241,32 @@
       baseContext.globalAlpha = 0.12;
       baseContext.lineWidth = 0.65 * pixelRatio;
       baseContext.lineCap = 'round';
-      drawPath(baseContext, profile, 2, profileToMap);
+      drawPath(baseContext, profile, 2, profileToBaseMap);
     }
 
     baseContext.globalAlpha = 1;
+  }
+
+  function drawMapTemplates() {
+    const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+    const zoomWeight = Math.max(0.82, Math.min(1.65, Math.sqrt(mapView.zoom)));
     for (const group of xyGroups) {
       const highlighted = group === sharedPair.xyGroup;
-      baseContext.strokeStyle = highlighted ? gold : categoryColor(group.kind);
-      baseContext.globalAlpha = highlighted
+      mapContext.strokeStyle = highlighted ? gold : categoryColor(group.kind);
+      mapContext.globalAlpha = highlighted
         ? 1
         : Math.min(0.96, 0.48 + 0.09 * Math.log2(group.members.length + 1));
-      baseContext.lineWidth =
+      mapContext.lineWidth =
         (highlighted
           ? 3.5
-          : Math.min(6, 1.25 + Math.log10(group.members.length) * 1.35)) * pixelRatio;
-      baseContext.lineCap = 'round';
-      baseContext.lineJoin = 'round';
-      drawPath(baseContext, group.profile, 2, profileToMap);
+          : Math.min(6, 1.25 + Math.log10(group.members.length) * 1.35)) *
+        zoomWeight *
+        pixelRatio;
+      mapContext.lineCap = 'round';
+      mapContext.lineJoin = 'round';
+      drawPath(mapContext, group.profile, 2, mapPosition);
     }
-    baseContext.globalAlpha = 1;
+    mapContext.globalAlpha = 1;
   }
 
   function drawMapMarkers() {
@@ -247,7 +274,7 @@
     for (const group of xyGroups) {
       const mean = meanActivePosition(group);
       if (!mean) continue;
-      const position = profileToMap(mean.position);
+      const position = mapPosition(mean.position);
       const radius = Math.min(16, 3.5 + Math.sqrt(group.members.length) * 0.7) * pixelRatio;
       mapContext.beginPath();
       mapContext.arc(position.x, position.y, radius, 0, Math.PI * 2);
@@ -270,8 +297,15 @@
   function drawMap() {
     mapContext.fillStyle = '#09111f';
     mapContext.fillRect(0, 0, map.width, map.height);
-    if (mapBase.width && mapBase.height) {
-      mapContext.drawImage(mapBase, 0, 0);
+    if (mapBase.width && mapBase.height && mapBaseTransform) {
+      const zoom = mapView.zoom;
+      const scale = mapBaseTransform.scale * zoom;
+      const offsetX =
+        (map.width / 2) * (1 - zoom) + (mapBaseTransform.x - mapView.x) * scale;
+      const offsetY =
+        (map.height / 2) * (1 - zoom) + (mapView.y - mapBaseTransform.y) * scale;
+      mapContext.drawImage(mapBase, offsetX, offsetY, map.width * zoom, map.height * zoom);
+      drawMapTemplates();
       drawMapMarkers();
     }
   }
@@ -399,11 +433,118 @@
     if (!previous) return null;
     if (!next) return pointWorld(previous);
     const span = next[3] - previous[3];
-    if (span <= 0) return previous;
+    if (span <= 0) return pointWorld(previous);
     const fraction = (state.t - previous[3]) / span;
     const a = pointWorld(previous);
     const b = pointWorld(next);
     return a.map((value, axis) => value + fraction * (b[axis] - value));
+  }
+
+  function median(values) {
+    const sorted = values.slice().sort((a, b) => a - b);
+    const middle = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+  }
+
+  function buildAirportAnchors() {
+    const sourcePoints = new Map();
+    const destinationPoints = new Map();
+    for (const session of sessions) {
+      const points = sessionPoints(session);
+      if (!points.length) continue;
+      if (session.src && ['departure', 'local'].includes(session.complete_kind)) {
+        const entries = sourcePoints.get(session.src) || [];
+        entries.push(pointWorld(points[0]));
+        sourcePoints.set(session.src, entries);
+      }
+      if (session.dest && ['arrival', 'local'].includes(session.complete_kind)) {
+        const entries = destinationPoints.get(session.dest) || [];
+        entries.push(pointWorld(points[points.length - 1]));
+        destinationPoints.set(session.dest, entries);
+      }
+    }
+    const summarize = (locations) =>
+      new Map(
+        [...locations].map(([code, positions]) => [
+          code,
+          [0, 1, 2].map((axis) => median(positions.map((position) => position[axis]))),
+        ]),
+      );
+    airportAnchors = { src: summarize(sourcePoints), dest: summarize(destinationPoints) };
+  }
+
+  function airportWorldPosition(code, role) {
+    const location = metadata.airport_locations?.[code];
+    if (location && Number.isFinite(Number(location.lat)) && Number.isFinite(Number(location.lon))) {
+      return geoWorld(Number(location.lon), Number(location.lat), 0);
+    }
+    return airportAnchors[role].get(code) || null;
+  }
+
+  function cameraFocus(positions) {
+    const selectedKinds = kindInputs.filter((input) => input.checked);
+    const sourceCode = sourceFilter.value;
+    const destinationCode = destinationFilter.value;
+    const hasSource = sourceCode !== '*' && sourceCode !== '__unspecified__';
+    const hasDestination = destinationCode !== '*' && destinationCode !== '__unspecified__';
+    if (selectedKinds.length === 1 && selectedKinds[0].dataset.kind === 'arrival' && hasDestination && !hasSource) {
+      const airportPosition = airportWorldPosition(destinationCode, 'dest');
+      if (airportPosition) return { mode: 'arrival', airportPosition };
+    }
+    if (selectedKinds.length === 1 && selectedKinds[0].dataset.kind === 'departure' && hasSource && !hasDestination) {
+      const airportPosition = airportWorldPosition(sourceCode, 'src');
+      if (airportPosition) return { mode: 'departure', airportPosition };
+    }
+    return { mode: 'cohort', airportPosition: null };
+  }
+
+  function updateAutoCamera(elapsedSeconds = 1 / 60, snap = false) {
+    if (!state.autoFrame || !worldBounds) return;
+    const positions = [];
+    for (const session of visibleSessions()) {
+      const position = pointAtTime(session);
+      if (position) positions.push(position);
+    }
+    if (!positions.length) return;
+
+    const focus = cameraFocus(positions);
+    const target = Analysis.calculateCameraFraming({
+      positions,
+      airportPosition: focus.airportPosition,
+      progress: state.max ? state.t / state.max : 0,
+      mode: focus.mode,
+      baseSpan: Math.max(worldBounds.xmax - worldBounds.xmin, worldBounds.ymax - worldBounds.ymin),
+      maxZoom: 12,
+    });
+    if (!target) return;
+
+    const alpha = snap || !cameraFrame.initialized
+      ? 1
+      : 1 - Math.exp(-Math.max(0.016, elapsedSeconds) / 0.45);
+    cameraFrame.center = cameraFrame.center.map(
+      (value, axis) => value + (target.center[axis] - value) * alpha,
+    );
+    cameraFrame.zoom += (target.zoom - cameraFrame.zoom) * alpha;
+    cameraFrame.initialized = true;
+    mapView = {
+      x: cameraFrame.center[0],
+      y: cameraFrame.center[1],
+      zoom: cameraFrame.zoom,
+    };
+
+    if (orbit && camera) {
+      const target3d = worldToThree(cameraFrame.center, worldTransform());
+      orbit.target.set(target3d[0], target3d[1], target3d[2]);
+      orbit.radius = 112 / cameraFrame.zoom;
+      orbit.update();
+    }
+  }
+
+  function setAutoFrame(enabled) {
+    state.autoFrame = enabled;
+    autoFrameButton.classList.toggle('active', enabled);
+    autoFrameButton.setAttribute('aria-pressed', String(enabled));
+    if (enabled) update(0.2, true);
   }
 
   function update3dMarkers(transform = worldTransform()) {
@@ -457,6 +598,11 @@
     slider.value = String(Math.floor(state.t));
   }
 
+  function updateSpeedNote() {
+    const stepLabel = timeBinSeconds.toLocaleString(undefined, { maximumFractionDigits: 2 });
+    speedNote.textContent = `${Analysis.formatPlaybackSpeed(state.speed)} · ${stepLabel} seconds per bin`;
+  }
+
   function renderCounts() {
     const visible = visibleSessions();
     const counts = Analysis.displayedCounts(metadata, sessions, visible, pointsKey);
@@ -476,7 +622,8 @@
     status.textContent = `${xyGroups.length} XY · ${xyzGroups.length} XYZ templates`;
   }
 
-  function update() {
+  function update(elapsedSeconds = 1 / 60, snapCamera = false) {
+    updateAutoCamera(elapsedSeconds, snapCamera);
     updateTimeLabel();
     drawMap();
     update3dMarkers();
@@ -500,21 +647,10 @@
     sharedPair = Analysis.findLargestSharedPair(xyGroups, xyzGroups);
     drawMapBase();
     build3dRoutes();
-    update();
+    update(0.2, true);
     renderCounts();
   }
 
-  function resetCamera() {
-    if (!camera || !orbit || !worldBounds) return;
-    orbit.target.set(0, 0, 0);
-    orbit.radius = 112;
-    orbit.theta = 0.8;
-    orbit.phi = 1.05;
-    camera.near = 0.1;
-    camera.far = 2000;
-    camera.updateProjectionMatrix();
-    orbit.update();
-  }
 
   function ingest(payload) {
     if (!payload?.meta?.sector || !Array.isArray(payload.sessions)) {
@@ -529,7 +665,7 @@
         ? exportedTimeBin
         : Analysis.TIME_BIN_SECONDS;
     const stepLabel = timeBinSeconds.toLocaleString(undefined, { maximumFractionDigits: 2 });
-    speedNote.textContent = `real-time speed · ${stepLabel} seconds per bin`;
+    updateSpeedNote();
     slider.setAttribute('aria-label', `Session-relative time in ${stepLabel}-second bins`);
     edgeNote.textContent =
       metadata.completeness?.edge_note || 'Sector-edge evidence is not specified in this export.';
@@ -543,12 +679,7 @@
       lat: (sector.lat_min + sector.lat_max) / 2,
     };
     kmPerLon = 111.32 * Math.cos((origin.lat * Math.PI) / 180);
-    geoBounds = {
-      lonMin: sector.lon_min,
-      lonMax: sector.lon_max,
-      latMin: sector.lat_min,
-      latMax: sector.lat_max,
-    };
+
     const normalized = Analysis.normalizeTimeline(payload.sessions, pointsKey);
     sessions.length = 0;
     for (const session of normalized) {
@@ -559,6 +690,9 @@
     computeBounds();
     populateAirportFilter(sourceFilter, 'src', 'Origin');
     populateAirportFilter(destinationFilter, 'dest', 'Destination');
+    buildAirportAnchors();
+    cameraFrame = { center: [0, 0, 0], zoom: 1, initialized: false };
+    mapView = { x: 0, y: 0, zoom: 1 };
     state.t = 0;
     state.max = sessions.reduce(
       (maximum, session) => Math.max(maximum, sessionPoints(session).at(-1)[3]),
@@ -566,14 +700,12 @@
     );
     slider.max = String(state.max);
     regroup();
-    resetCamera();
-    update();
   }
 
   function seek(value) {
     state.t = Math.max(0, Math.min(state.max, Number(value) || 0));
     state.lastFrame = 0;
-    update();
+    update(0.15, true);
   }
 
   function togglePlayback() {
@@ -596,7 +728,7 @@
           state.playing = false;
           document.getElementById('play').textContent = '▶ Play';
         }
-        update();
+        update(elapsedSeconds);
       }
       state.lastFrame = now;
     }
@@ -612,6 +744,7 @@
     map.height = Math.max(1, Math.floor(bounds.height * pixelRatio));
     mapBase.width = map.width;
     mapBase.height = map.height;
+    updateMapBaseTransform();
     drawMapBase();
     drawMap();
     if (renderer && camera) {
@@ -657,6 +790,7 @@
 
     const canvas = renderer.domElement;
     canvas.addEventListener('pointerdown', (event) => {
+      setAutoFrame(false);
       orbit.dragging = true;
       orbit.x = event.clientX;
       orbit.y = event.clientY;
@@ -681,6 +815,7 @@
       'wheel',
       (event) => {
         event.preventDefault();
+        setAutoFrame(false);
         orbit.radius = Math.max(8, Math.min(1500, orbit.radius * Math.exp(event.deltaY * 0.001)));
         orbit.update();
       },
@@ -690,6 +825,7 @@
   }
 
   document.getElementById('play').addEventListener('click', togglePlayback);
+  autoFrameButton.addEventListener('click', () => setAutoFrame(!state.autoFrame));
   document.querySelectorAll('.speed').forEach((button) => {
     button.addEventListener('click', () => {
       state.speed = Number(button.dataset.speed);
@@ -697,6 +833,7 @@
         candidate.classList.toggle('active', candidate === button);
       });
       button.title = Analysis.formatPlaybackSpeed(state.speed);
+      updateSpeedNote();
     });
   });
   slider.addEventListener('input', (event) => seek(event.target.value));

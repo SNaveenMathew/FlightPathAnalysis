@@ -31,6 +31,7 @@
   <div id="grouping-summary">XY and XYZ templates are grouped independently.</div>
   <div class="caveat">Observed takeoff/landing events are distinct from inferred route endpoints. <span id="edge-note">Edge-band evidence is reported by the loaded export.</span> <span id="quality-note">QC flags remain visible quality information and do not silently remove whole sessions.</span></div>
   <div class="caveat">Airport filters use event-linked takeoff/touchdown airport codes propagated to sessions; blank codes are unspecified, not guesses from endpoint proximity.</div>
+  <div class="caveat" id="camera-note">Auto frame follows arrival traffic toward the selected landing airport, departure traffic outward from the selected takeoff airport, and the active traffic envelope for other filters. Toggle Auto frame off to retain manual 3D orbit/zoom.</div>
 </section>
 <main id="views">
   <section class="view">
@@ -67,6 +68,7 @@
 </main>
 <footer id="controls">
   <button id="play" type="button">▶ Play</button>
+  <button id="auto-frame" class="active" type="button" aria-pressed="true">Auto frame</button>
   <button class="speed" data-speed="1" type="button" title="1× real time">1×</button>
   <button class="speed active" data-speed="4" type="button" title="4× real time">4×</button>
   <button class="speed" data-speed="16" type="button" title="16× real time">16×</button>

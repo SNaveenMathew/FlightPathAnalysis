@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   advanceTimeline,
+  calculateCameraFraming,
   displayedCounts,
   findLargestSharedPair,
   formatPlaybackSpeed,
@@ -46,6 +47,63 @@ test('playback speed labels match real-time advancement and five-second bins', (
   assert.equal(formatPlaybackSpeed(16), '16× real time');
   assert.equal(advanceTimeline(0, 1, 16, 5), 3.2);
   assert.equal(advanceTimeline(0, 0.25, 16, 5) * 5, 4);
+});
+
+test('arrival framing starts with aircraft and moves toward the selected airport', () => {
+  const positions = [[-30, 0, 8], [30, 0, 6]];
+  const airportPosition = [0, 0, 0];
+  const start = calculateCameraFraming({
+    positions,
+    airportPosition,
+    progress: 0,
+    mode: 'arrival',
+    baseSpan: 100,
+  });
+  const end = calculateCameraFraming({
+    positions: [[-1, 0, 2], [1, 0, 1]],
+    airportPosition,
+    progress: 1,
+    mode: 'arrival',
+    baseSpan: 100,
+  });
+
+  assert.deepEqual(start.center, [0, 0, 7]);
+  assert.ok(end.center[2] < start.center[2]);
+  assert.ok(end.zoom > start.zoom);
+});
+
+test('departure framing starts at the origin and zooms out with progress', () => {
+  const airportPosition = [0, 0, 0];
+  const start = calculateCameraFraming({
+    positions: [[-2, 0, 0], [2, 0, 0]],
+    airportPosition,
+    progress: 0,
+    mode: 'departure',
+    baseSpan: 100,
+  });
+  const end = calculateCameraFraming({
+    positions: [[-30, 0, 10], [30, 0, 20]],
+    airportPosition,
+    progress: 1,
+    mode: 'departure',
+    baseSpan: 100,
+  });
+
+  assert.deepEqual(start.center, airportPosition);
+  assert.deepEqual(end.center, [0, 0, 15]);
+  assert.ok(end.zoom < start.zoom);
+});
+
+test('broad cohorts use bounded framing when airports are not singularly selected', () => {
+  const frame = calculateCameraFraming({
+    positions: [[-100, -40, 5], [100, 40, 10]],
+    progress: 0.7,
+    baseSpan: 200,
+    maxZoom: 12,
+  });
+
+  assert.equal(frame.mode, 'cohort');
+  assert.ok(frame.zoom <= 2.2);
 });
 
 test('displayed counts use export totals and current-filter session counts', () => {

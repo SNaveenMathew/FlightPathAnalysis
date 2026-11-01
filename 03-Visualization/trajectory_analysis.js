@@ -200,10 +200,74 @@
     return positionBins + (elapsedSeconds * rate) / binSeconds;
   }
 
+  function calculateCameraFraming({
+    positions,
+    airportPosition = null,
+    progress = 0,
+    mode = 'cohort',
+    baseSpan = 1,
+    maxZoom = 12,
+  }) {
+    const validPositions = positions.filter(
+      (position) => position.length >= 3 && position.every(Number.isFinite),
+    );
+    if (!validPositions.length) return null;
+
+    const centroid = [0, 0, 0];
+    const minimum = [Infinity, Infinity];
+    const maximum = [-Infinity, -Infinity];
+    for (const position of validPositions) {
+      for (let axis = 0; axis < 3; axis += 1) centroid[axis] += position[axis];
+      for (let axis = 0; axis < 2; axis += 1) {
+        minimum[axis] = Math.min(minimum[axis], position[axis]);
+        maximum[axis] = Math.max(maximum[axis], position[axis]);
+      }
+    }
+    for (let axis = 0; axis < 3; axis += 1) centroid[axis] /= validPositions.length;
+
+    const safeBaseSpan = Math.max(Number(baseSpan) || 1, 1);
+    const safeMaxZoom = Math.max(Number(maxZoom) || 1, 1);
+    const activeSpan = Math.max(
+      maximum[0] - minimum[0],
+      maximum[1] - minimum[1],
+      safeBaseSpan / safeMaxZoom,
+    );
+    const fitZoom = safeBaseSpan / (activeSpan * 1.25);
+    const progressValue = Math.max(0, Math.min(1, Number(progress) || 0));
+    const easedProgress = progressValue * progressValue * (3 - 2 * progressValue);
+    const hasAirport =
+      Array.isArray(airportPosition) &&
+      airportPosition.length >= 3 &&
+      airportPosition.every(Number.isFinite);
+    let center = centroid.slice();
+    let zoom = Math.max(0.8, Math.min(2.2, fitZoom));
+
+    if (hasAirport && mode === 'arrival') {
+      const airportBlend = easedProgress * 0.78;
+      center = centroid.map(
+        (value, axis) => value + (airportPosition[axis] - value) * airportBlend,
+      );
+      center[2] = centroid[2] + (airportPosition[2] - centroid[2]) * easedProgress * 0.35;
+      zoom = fitZoom * (1 + 2.2 * easedProgress);
+    } else if (hasAirport && mode === 'departure') {
+      center = centroid.map(
+        (value, axis) => airportPosition[axis] + (value - airportPosition[axis]) * easedProgress,
+      );
+      zoom = fitZoom / (1 + 3 * easedProgress);
+    }
+
+    return {
+      center,
+      zoom: Math.max(0.8, Math.min(safeMaxZoom, zoom)),
+      mode: hasAirport ? mode : 'cohort',
+    };
+  }
+
   const api = {
     TIME_BIN_SECONDS,
     advanceTimeline,
     buildTemplateGroups,
+    calculateCameraFraming,
     displayedCounts,
     findLargestSharedPair,
     formatPlaybackSpeed,

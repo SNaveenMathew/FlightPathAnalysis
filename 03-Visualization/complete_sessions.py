@@ -106,6 +106,35 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _airport_locations(
+    codes: set[str], database_path: str | Path | None = None
+) -> dict[str, dict[str, float]]:
+    requested = {str(code).strip().upper() for code in codes if str(code).strip()}
+    path = Path(database_path) if database_path else repo_root() / "data" / "GlobalAirportDatabase.txt"
+    if not requested or not path.is_file():
+        return {}
+
+    locations = {}
+    with path.open(encoding="utf-8") as source:
+        for line in source:
+            fields = line.rstrip("\r\n").split(":")
+            if len(fields) < 4:
+                continue
+            code = fields[1].strip().upper()
+            if code not in requested:
+                continue
+            try:
+                latitude, longitude = map(float, fields[-2:])
+            except ValueError:
+                continue
+            if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+                continue
+            if latitude == 0 and longitude == 0:
+                continue
+            locations[code] = {"lat": latitude, "lon": longitude}
+    return locations
+
+
 def candidate_feather_paths() -> list[Path]:
     root = repo_root()
     return [
@@ -789,6 +818,16 @@ def export_session_payload(
             "flagged_points": int(flagged_points.sum()),
             "flag_events": int(flag_events.sum()),
         }
+
+    airport_codes = set()
+    for column in ("src", "dest"):
+        if column in selected_summary.columns:
+            airport_codes.update(
+                value.strip().upper()
+                for value in selected_summary[column].dropna().astype(str)
+                if value.strip()
+            )
+    payload["meta"]["airport_locations"] = _airport_locations(airport_codes)
 
     destination = (
         Path(out_path)
