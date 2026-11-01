@@ -61,7 +61,13 @@ prerequisites or alternatives.
      continuous `(x, y, z)` with discretized `t`.
 
    Each page fetches its corresponding JSON by default; use its Load button
-   if automatic loading fails.
+   if automatic loading fails. Both pages independently group the same filtered
+   sessions in XY and XYZ, compare actual shared membership, and animate template
+   mean positions in five-second session-relative bins. Origin/destination filters
+   use airport codes attached to takeoff/touchdown events; missing event codes are
+   left unspecified rather than inferred from endpoint proximity. The viewer shows
+   export and filter counts, including QC-flagged points, without dropping entire
+   sessions for QC flags.
 
 This repository currently contains preprocessing and trajectory exploration,
 not an RL environment, policy, or training loop.
