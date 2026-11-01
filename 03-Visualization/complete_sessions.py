@@ -550,6 +550,11 @@ def discretize_sessions(
     occ["y"] = box["lat_min"] + (occ["iy"] + 0.5) * bins["dy"]
     occ["z"] = (occ["iz"] + 0.5) * bins["dz"]
     occ["t"] = occ["it"] * bins["dt"]
+    occ.attrs["n_in_sector_points"] = int(len(sub))
+    occ.attrs["n_points_by_session"] = {
+        str(session_id): int(count)
+        for session_id, count in sub.groupby("aircraft_session_id", sort=False).size().items()
+    }
     return occ
 
 
@@ -600,6 +605,7 @@ def occupancy_to_payload(
 ) -> dict[str, Any]:
     sessions = []
     voxel_hits: dict[tuple[int, int, int], list[dict[str, Any]]] = defaultdict(list)
+    n_points_by_session = occ.attrs.get("n_points_by_session", {})
     for sid, group in occ.groupby("aircraft_session_id", sort=False, dropna=False):
         meta = summary.loc[sid] if sid in summary.index else None
         ix = group["ix"].to_numpy(dtype=np.int32, copy=False)
@@ -634,6 +640,7 @@ def occupancy_to_payload(
                 "src": None if meta is None or pd.isna(meta["src"]) else str(meta["src"]),
                 "dest": None if meta is None or pd.isna(meta["dest"]) else str(meta["dest"]),
                 "quality": _quality_payload(meta),
+                "n_points": int(n_points_by_session.get(session_id, len(group))),
                 "t_max": float(group["t"].max()),
                 "n_occ": int(len(group)),
                 "occ": session_occ.tolist(),
@@ -646,6 +653,9 @@ def occupancy_to_payload(
             "sector_source": "preprocessor_config",
             "bins": bins,
             "n_sessions": len(sessions),
+            "n_in_sector_points": int(
+                occ.attrs.get("n_in_sector_points", sum(s["n_points"] for s in sessions))
+            ),
             "n_occupancy": int(len(occ)),
         },
         "sessions": sessions,
@@ -715,6 +725,7 @@ def continuous_sessions_to_payload(
             "time_step_seconds": float(dt),
             "n_sessions": len(sessions),
             "n_points": sum(session["n_points"] for session in sessions),
+            "n_in_sector_points": sum(session["n_points"] for session in sessions),
         },
         "sessions": sessions,
     }

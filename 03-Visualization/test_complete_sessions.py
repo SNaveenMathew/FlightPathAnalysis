@@ -244,6 +244,8 @@ class CompleteSessionFilterTests(unittest.TestCase):
         self.assertEqual(meta["quality"]["sessions_with_flags"], 1)
         self.assertIn("above-ceiling", meta["quality"]["filtering"])
         self.assertEqual(payload["sessions"][0]["quality"]["altitude_ceiling_points"], 1)
+        self.assertEqual(payload["meta"]["n_in_sector_points"], 5)
+        self.assertEqual(payload["sessions"][0]["n_points"], 5)
         self.assertEqual(len(payload["sessions"][0]["occ"]), 5)
 
     def test_qc_flags_are_reported_without_dropping_complete_session(self):
@@ -303,6 +305,7 @@ class CompleteSessionFilterTests(unittest.TestCase):
             df, keep, summary, box, dt=5, source="synthetic"
         )
         self.assertEqual(len(continuous["sessions"][0]["points"]), 5)
+        self.assertEqual(continuous["meta"]["n_in_sector_points"], 5)
         self.assertEqual(
             min(point[3] for point in continuous["sessions"][0]["points"]), 0
         )
