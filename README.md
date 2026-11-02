@@ -74,6 +74,18 @@ prerequisites or alternatives.
      `(x, y, z, t)`.
    - <http://127.0.0.1:8765/02-session_space_viz_continuous.html> for
      continuous `(x, y, z)` with discretized `t`.
+   - <http://127.0.0.1:8765/03-session_space_viz_phase.html> for the separate
+     phase-colored discrete route-template animation.
+   - <http://127.0.0.1:8765/03-session_space_viz_continuous_phase.html> for the
+     corresponding continuous-coordinate phase animation.
+
+   Both the standard and phase-variant pages keep route groups colored by
+   category initially. Click an XY or XYZ template to overlay its segment phases
+   and show the path-wide dominant-phase percentage for that group; click empty
+   XY space to clear the selection. Segment colors are the local majority among
+   group members at the segment midpoint (ties break alphabetically). The
+   path-wide percentage uses each member's most frequent phase over its exported
+   phase samples. Grouping and phase votes update when filters or tolerance change.
 
    Each page fetches its corresponding JSON by default; use its Load button
    if automatic loading fails. Both pages independently group the same filtered
