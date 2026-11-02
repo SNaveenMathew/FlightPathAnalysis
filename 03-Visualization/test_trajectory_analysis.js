@@ -10,6 +10,7 @@ const {
   displayedCounts,
   findLargestSharedPair,
   formatPlaybackSpeed,
+  mergeNearbyMarkers,
   normalizeTimeline,
   phaseProfileForSession,
 } = require('./trajectory_analysis.js');
@@ -30,6 +31,49 @@ test('shared membership is calculated from session IDs, not group IDs', () => {
   assert.deepEqual(largest.sessionIds.sort(), ['b', 'c']);
   assert.equal(largest.xyGroup, xy[0]);
   assert.equal(largest.xyzGroup, xyz[1]);
+});
+
+test('nearby active marker counts merge with a weighted position', () => {
+  const merged = mergeNearbyMarkers(
+    [
+      { position: [0, 0, 2], count: 3, highlighted: true },
+      { position: [4, 0, 6], count: 5 },
+      { position: [40, 0, 12], count: 2 },
+    ],
+    2,
+    6,
+  );
+
+  assert.equal(merged.length, 2);
+  assert.equal(merged[0].count, 8);
+  assert.equal(merged[0].groupCount, 2);
+  assert.deepEqual(merged[0].position, [2.5, 0, 4.5]);
+  assert.equal(merged[0].highlighted, true);
+  assert.equal(merged[1].count, 2);
+});
+
+test('marker merging avoids chaining a distant route through an intermediate group', () => {
+  const merged = mergeNearbyMarkers(
+    [
+      { position: [0, 0, 0], count: 20 },
+      { position: [4, 0, 0], count: 10 },
+      { position: [8, 0, 0], count: 1 },
+    ],
+    2,
+    5,
+  );
+
+  assert.deepEqual(merged.map((marker) => marker.count), [30, 1]);
+});
+
+test('XYZ marker merging respects altitude while XY can merge crossing positions', () => {
+  const markers = [
+    { position: [0, 0, 0], count: 3 },
+    { position: [0, 0, 8], count: 4 },
+  ];
+
+  assert.equal(mergeNearbyMarkers(markers, 2, 6)[0].count, 7);
+  assert.equal(mergeNearbyMarkers(markers, 3, 6).length, 2);
 });
 
 test('timeline normalization starts each session at its first retained point', () => {

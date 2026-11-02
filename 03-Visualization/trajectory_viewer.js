@@ -69,6 +69,8 @@
   let routeObject;
   let sharedObject;
   let markerObject;
+  let markerCountLabelLayer;
+  let markerCountLabelEntries = [];
   let xyGroups = [];
   let xyzGroups = [];
   let sharedPair = { xyGroup: null, xyzGroup: null, sessionIds: [], count: 0 };
@@ -377,22 +379,19 @@
 
   function drawMapMarkers() {
     const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
-    for (const group of xyGroups) {
-      const mean = meanActivePosition(group);
-      if (!mean) continue;
-      const position = mapPosition(mean.position);
-      const radius = Math.min(16, 3.5 + Math.sqrt(group.members.length) * 0.7) * pixelRatio;
+    const markers = activeMarkerClusters(xyGroups, 2);
+    for (const marker of markers) {
+      const position = mapPosition(marker.position);
+      const radius = Math.min(16, 3.5 + Math.sqrt(marker.count) * 0.7) * pixelRatio;
       mapContext.beginPath();
       mapContext.arc(position.x, position.y, radius, 0, Math.PI * 2);
-      mapContext.fillStyle = `rgb(${markerColor(mean.position[2] / 0.0003048).join(',')})`;
+      mapContext.fillStyle = `rgb(${markerColor(marker.position[2] / 0.0003048).join(',')})`;
       mapContext.fill();
-      const highlighted = phaseOverlay
-        ? group === (selectedXYGroup || sharedPair.xyGroup)
-        : group === sharedPair.xyGroup;
-      mapContext.strokeStyle = highlighted ? gold : '#09111f';
-      mapContext.lineWidth = highlighted ? 2 * pixelRatio : pixelRatio;
+      mapContext.strokeStyle = marker.highlighted ? gold : '#09111f';
+      mapContext.lineWidth = marker.highlighted ? 2 * pixelRatio : pixelRatio;
       mapContext.stroke();
     }
+    drawMergedMarkerCounts(markers, pixelRatio);
 
     mapContext.fillStyle = '#91a2ba';
     mapContext.font = `${11 * pixelRatio}px system-ui`;
@@ -401,6 +400,60 @@
       12 * pixelRatio,
       map.height - 12 * pixelRatio,
     );
+  }
+
+  function drawMergedMarkerCounts(markers, pixelRatio) {
+    const occupied = [];
+    mapContext.font = `600 ${10 * pixelRatio}px ui-monospace, monospace`;
+    mapContext.textAlign = 'center';
+    mapContext.textBaseline = 'bottom';
+    mapContext.lineJoin = 'round';
+    const offsets = [
+      [0, 0], [0, -14], [0, 14], [18, -14], [-18, -14],
+      [18, 14], [-18, 14], [0, -28], [0, 28],
+    ];
+    for (const marker of markers) {
+      if (marker.groupCount < 2) continue;
+      const position = mapPosition(marker.position);
+      const radius = Math.min(16, 3.5 + Math.sqrt(marker.count) * 0.7) * pixelRatio;
+      if (
+        position.x < -radius || position.x > map.width + radius ||
+        position.y < -radius || position.y > map.height + radius
+      ) continue;
+      const text = marker.count.toLocaleString();
+      const width = mapContext.measureText(text).width;
+      let labelPosition = null;
+      for (const [offsetX, offsetY] of offsets) {
+        const x = Math.max(
+          width / 2 + 2 * pixelRatio,
+          Math.min(map.width - width / 2 - 2 * pixelRatio, position.x + offsetX * pixelRatio),
+        );
+        const y = Math.max(
+          12 * pixelRatio,
+          Math.min(map.height - 4 * pixelRatio, position.y - radius - 3 * pixelRatio + offsetY * pixelRatio),
+        );
+        const overlaps = occupied.some((label) =>
+          Math.abs(label.x - x) < (label.width + width) / 2 + 3 * pixelRatio &&
+          Math.abs(label.y - y) < 13 * pixelRatio,
+        );
+        if (!overlaps) {
+          labelPosition = { x, y };
+          break;
+        }
+      }
+      if (!labelPosition) {
+        labelPosition = {
+          x: Math.max(width / 2 + 2 * pixelRatio, Math.min(map.width - width / 2 - 2 * pixelRatio, position.x)),
+          y: Math.max(12 * pixelRatio, Math.min(map.height - 4 * pixelRatio, position.y + 30 * pixelRatio)),
+        };
+      }
+      occupied.push({ ...labelPosition, width });
+      mapContext.strokeStyle = '#09111f';
+      mapContext.lineWidth = 3 * pixelRatio;
+      mapContext.strokeText(text, labelPosition.x, labelPosition.y);
+      mapContext.fillStyle = '#ffffff';
+      mapContext.fillText(text, labelPosition.x, labelPosition.y);
+    }
   }
 
   function drawMap() {
@@ -688,6 +741,24 @@
     return { position: [x / count, y / count, z / count], activeCount: count };
   }
 
+  function activeMarkerClusters(groups, dimensions) {
+    const highlightedGroup = dimensions === 2
+      ? phaseOverlay ? selectedXYGroup || sharedPair.xyGroup : sharedPair.xyGroup
+      : phaseOverlay ? selectedXYZGroup || sharedPair.xyzGroup : sharedPair.xyzGroup;
+    const markers = [];
+    for (const group of groups) {
+      const mean = meanActivePosition(group);
+      if (!mean) continue;
+      markers.push({
+        position: mean.position,
+        count: mean.activeCount,
+        highlighted: group === highlightedGroup,
+      });
+    }
+    const mergeRadius = Math.max(6, Math.min(18, projectTolerance() * 0.5));
+    return Analysis.mergeNearbyMarkers(markers, dimensions, mergeRadius);
+  }
+
   function pointAtTime(session) {
     const points = sessionPoints(session);
     if (!points.length || state.t < points[0][3] || state.t > points[points.length - 1][3]) return null;
@@ -835,6 +906,87 @@
     }
     drawMap();
     if (renderer && scene) renderer.render(scene, camera);
+    update3dMarkerCountLabelPositions();
+  }
+
+  function set3dMarkerCountLabels(markers, transform) {
+    if (!markerCountLabelLayer) return;
+    markerCountLabelLayer.replaceChildren();
+    markerCountLabelEntries = [];
+    for (const marker of markers) {
+      if (marker.groupCount < 2) continue;
+      const label = document.createElement('span');
+      label.textContent = marker.count.toLocaleString();
+      Object.assign(label.style, {
+        position: 'absolute',
+        visibility: 'hidden',
+        padding: '1px 4px',
+        border: marker.highlighted
+          ? '1px solid rgba(244,197,66,0.9)'
+          : '1px solid rgba(255,255,255,0.35)',
+        borderRadius: '4px',
+        background: 'rgba(9,17,31,0.92)',
+        color: marker.highlighted ? gold : '#ffffff',
+        font: '600 10px ui-monospace, monospace',
+        whiteSpace: 'nowrap',
+        transform: 'translate(-50%, -125%)',
+      });
+      markerCountLabelLayer.appendChild(label);
+      markerCountLabelEntries.push({
+        element: label,
+        position: new THREE.Vector3(...worldToThree(marker.position, transform)),
+      });
+    }
+  }
+
+  function update3dMarkerCountLabelPositions() {
+    if (!markerCountLabelLayer || !camera) return;
+    const width = markerCountLabelLayer.clientWidth;
+    const height = markerCountLabelLayer.clientHeight;
+    const placed = [];
+    const offsets = [
+      [0, -14], [0, 14], [18, -14], [-18, -14],
+      [18, 14], [-18, 14], [0, -30], [0, 30],
+    ];
+    for (const entry of markerCountLabelEntries) {
+      const projected = entry.position.clone().project(camera);
+      const x = ((projected.x + 1) / 2) * width;
+      const y = ((1 - projected.y) / 2) * height;
+      const visible =
+        projected.z >= -1 && projected.z <= 1 &&
+        x >= 0 && x <= width && y >= 0 && y <= height;
+      if (!visible) {
+        entry.element.style.visibility = 'hidden';
+        continue;
+      }
+
+      const labelWidth = entry.element.offsetWidth;
+      let labelPosition = null;
+      for (const [offsetX, offsetY] of offsets) {
+        const candidate = {
+          x: Math.max(labelWidth / 2 + 2, Math.min(width - labelWidth / 2 - 2, x + offsetX)),
+          y: Math.max(18, Math.min(height - 2, y + offsetY)),
+        };
+        const overlaps = placed.some((label) =>
+          Math.abs(label.x - candidate.x) < (label.width + labelWidth) / 2 + 3 &&
+          Math.abs(label.y - candidate.y) < 18,
+        );
+        if (!overlaps) {
+          labelPosition = candidate;
+          break;
+        }
+      }
+      if (!labelPosition) {
+        labelPosition = {
+          x: Math.max(labelWidth / 2 + 2, Math.min(width - labelWidth / 2 - 2, x)),
+          y: Math.max(18, Math.min(height - 2, y + 32)),
+        };
+      }
+      entry.element.style.visibility = 'visible';
+      entry.element.style.left = `${labelPosition.x}px`;
+      entry.element.style.top = `${labelPosition.y}px`;
+      placed.push({ ...labelPosition, width: labelWidth });
+    }
   }
 
   function update3dMarkers(transform = worldTransform()) {
@@ -844,12 +996,12 @@
     const positions = [];
     const colors = [];
     const sizes = [];
-    for (const group of xyzGroups) {
-      const mean = meanActivePosition(group);
-      if (!mean) continue;
-      positions.push(...worldToThree(mean.position, transform));
-      colors.push(...markerColor(mean.position[2] / 0.0003048).map((value) => value / 255));
-      sizes.push(Math.min(24, 5 + Math.sqrt(group.members.length) * 0.85));
+    const markers = activeMarkerClusters(xyzGroups, 3);
+    set3dMarkerCountLabels(markers, transform);
+    for (const marker of markers) {
+      positions.push(...worldToThree(marker.position, transform));
+      colors.push(markerColor(marker.position[2] / 0.0003048).map((value) => value / 255));
+      sizes.push(Math.min(24, 5 + Math.sqrt(marker.count) * 0.85));
     }
     const geometry = makeGeometry(positions, colors, sizes);
     const material = new THREE.ShaderMaterial({
@@ -1062,6 +1214,7 @@
     }
     if (orbit) orbit.update();
     if (renderer && scene) renderer.render(scene, camera);
+    update3dMarkerCountLabelPositions();
     requestAnimationFrame(animate);
   }
 
@@ -1091,6 +1244,15 @@
     renderer.setClearColor('#09111f');
     const canvas = renderer.domElement;
     host.appendChild(canvas);
+    markerCountLabelLayer = document.createElement('div');
+    Object.assign(markerCountLabelLayer.style, {
+      position: 'absolute',
+      inset: '0',
+      overflow: 'hidden',
+      pointerEvents: 'none',
+      zIndex: '1',
+    });
+    host.appendChild(markerCountLabelLayer);
     scene = new THREE.Scene();
     camera = new THREE.PerspectiveCamera(
       48,

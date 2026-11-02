@@ -421,6 +421,74 @@
     return largest;
   }
 
+  function mergeNearbyMarkers(markers, dimensions, distanceThreshold) {
+    const axisCount = dimensions === 3 ? 3 : 2;
+    const threshold = Number(distanceThreshold);
+    if (!Number.isFinite(threshold) || threshold < 0) return [];
+
+    const candidates = markers
+      .filter((marker) =>
+        Array.isArray(marker.position) &&
+        marker.position.length >= 3 &&
+        marker.position.slice(0, 3).every(Number.isFinite) &&
+        Number.isFinite(Number(marker.count)) &&
+        Number(marker.count) > 0,
+      )
+      .map((marker) => ({
+        position: marker.position.slice(0, 3),
+        count: Number(marker.count),
+        groupCount: Math.max(1, Number(marker.groupCount) || 1),
+        highlighted: Boolean(marker.highlighted),
+      }))
+      .sort((a, b) => b.count - a.count);
+    const thresholdSquared = threshold * threshold;
+    const clusters = [];
+
+    for (const marker of candidates) {
+      let nearestCluster = null;
+      let nearestDistanceSquared = Infinity;
+      for (const cluster of clusters) {
+        const compatible = cluster.members.every((member) => {
+          let distanceSquared = 0;
+          for (let axis = 0; axis < axisCount; axis += 1) {
+            distanceSquared += (marker.position[axis] - member.position[axis]) ** 2;
+          }
+          return distanceSquared <= thresholdSquared;
+        });
+        if (!compatible) continue;
+
+        let centerDistanceSquared = 0;
+        for (let axis = 0; axis < axisCount; axis += 1) {
+          centerDistanceSquared += (marker.position[axis] - cluster.position[axis]) ** 2;
+        }
+        if (centerDistanceSquared < nearestDistanceSquared) {
+          nearestCluster = cluster;
+          nearestDistanceSquared = centerDistanceSquared;
+        }
+      }
+
+      if (!nearestCluster) {
+        clusters.push({
+          ...marker,
+          members: [marker],
+        });
+        continue;
+      }
+
+      const combinedCount = nearestCluster.count + marker.count;
+      nearestCluster.position = nearestCluster.position.map(
+        (value, axis) =>
+          (value * nearestCluster.count + marker.position[axis] * marker.count) / combinedCount,
+      );
+      nearestCluster.count = combinedCount;
+      nearestCluster.groupCount += marker.groupCount;
+      nearestCluster.highlighted ||= marker.highlighted;
+      nearestCluster.members.push(marker);
+    }
+
+    return clusters.map(({ members, ...cluster }) => cluster);
+  }
+
   function sessionPointCount(session, pointsKey) {
     const explicit = Number(session.n_points ?? session.n_in_sector_points);
     return Number.isFinite(explicit) && explicit >= 0
@@ -532,6 +600,7 @@
     dominantValue,
     findLargestSharedPair,
     formatPlaybackSpeed,
+    mergeNearbyMarkers,
     normalizeTimeline,
     phaseProfileForSession,
     resamplePath,
