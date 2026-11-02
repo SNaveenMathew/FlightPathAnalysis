@@ -83,18 +83,25 @@ prerequisites or alternatives.
    category initially. Click an XY or XYZ template to overlay its segment phases
    and show the path-wide dominant-phase percentage for that group; click empty
    XY space to clear the selection. Segment colors are the local majority among
-   group members at the segment midpoint (ties break alphabetically). The
-   path-wide percentage uses each member's most frequent phase over its exported
-   phase samples. Grouping and phase votes update when filters or tolerance change.
+   group members at the segment midpoint (ties break alphabetically). Segment
+   width and brightness now encode the number/share of all filtered sessions
+   passing through each short local section, including sessions from other
+   full-route groups. Each template interval is split into three short sections;
+   a filtered session counts once for a section if a simplified trajectory sample
+   lies within half the active template tolerance (at least 1 km). This share is
+   normalized by all currently filtered sessions. A spatial index narrows candidate
+   checks. The path-wide phase percentage still uses each member's most frequent
+   phase over its exported samples.
 
    Each page fetches its corresponding JSON by default; use its Load button
    if automatic loading fails. Both pages independently group the same filtered
    sessions in XY and XYZ, compare actual shared membership, and animate template
    mean positions in five-second session-relative bins. Origin/destination filters
    use airport codes attached to takeoff/touchdown events; missing event codes are
-   left unspecified rather than inferred from endpoint proximity. The viewer shows
-   export and filter counts, including QC-flagged points, without dropping entire
-   sessions for QC flags.
+   left unspecified rather than inferred from endpoint proximity. The Zoom −/+
+   buttons adjust both views and preserve Auto frame's live tracking scale; turn
+   Auto frame off for manual 3D orbit. The viewer shows export and filter counts,
+   including QC-flagged points, without dropping entire sessions for QC flags.
 
 This repository currently contains preprocessing and trajectory exploration,
 not an RL environment, policy, or training loop.
