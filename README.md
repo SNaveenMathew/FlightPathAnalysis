@@ -37,7 +37,18 @@ prerequisites or alternatives.
    this is separate from the aircraft session labels. The downloader outputs
    should be present in the repository's `data/` directory.
 
-3. **Export complete-session data:** run
+3. **Infer JFK flight phases:** run
+   `python 02-Preprocessing/02-tag_flight_phases.py`
+   after session preprocessing. It reads `full_ac_data.feather` and writes the
+   compact `jfk_flight_phase_tags.feather` sidecar keyed by
+   `(aircraft_session_id, ts)`, plus `jfk_flight_phase_sample.csv` for a
+   deterministic 300-session audit sample. Unlike the JFK-destination-only
+   subset, this input preserves all processed points in selected sessions,
+   including buffers. The phase labels are causal ADS-B-based estimates; JFK
+   event flags select the cohort but do not
+   determine the per-sample phase.
+
+4. **Export complete-session data:** run
    `03-Visualization/01-complete_sessions.ipynb`. Set `MODE` in the notebook to
    `"discrete"` for binned `(x, y, z, t)` output (`complete_sessions.json`), or
    `"continuous"` for continuous lon/lat/altitude with discretized time
@@ -51,9 +62,13 @@ prerequisites or alternatives.
    points are excluded. The notebook reports counts and plots sample tracks.
    Exported trajectories contain only in-sector points and set `t=0` at the
    first retained sample. QC flags are summarized but do not otherwise exclude
-   sessions.
+   sessions. The notebook exports the complete JFK phase-tagged cohort and
+   includes exact per-point `phase_samples`, run-length `phase_intervals`, and
+   `flight_phase_changed` alongside the existing coordinate arrays. The change
+   flag is false at each track-segment start and true only when the current
+   estimated label differs from its prior sample in that segment.
 
-4. **View the trajectories:** from `03-Visualization/`, start
+5. **View the trajectories:** from `03-Visualization/`, start
    `python -m http.server 8765`, then open either:
    - <http://127.0.0.1:8765/02-session_space_viz.html> for discretized
      `(x, y, z, t)`.
