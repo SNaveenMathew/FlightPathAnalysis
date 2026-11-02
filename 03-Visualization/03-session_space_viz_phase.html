@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Discrete-space flight-phase route templates</title>
+<style>
+:root{color-scheme:dark;--bg:#09111f;--panel:#101d30;--line:#243650;--text:#e7eef9;--muted:#a0aec2;--accent:#62b5ff;--gold:#f4c542}*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font:13px system-ui,sans-serif}#app{height:100%;display:flex;flex-direction:column;min-height:0}header{flex:none;padding:9px 14px;background:var(--panel);border-bottom:1px solid var(--line)}.topline{display:flex;align-items:center;gap:14px}h1{margin:0;white-space:nowrap;font-size:16px}#filters{display:flex;align-items:center;justify-content:flex-end;gap:8px 10px;flex:1;flex-wrap:wrap;color:var(--muted);font-size:11px}#filters label{display:flex;align-items:center;gap:4px;white-space:nowrap}#filters input{accent-color:var(--accent)}select,button{border:1px solid var(--line);border-radius:5px;padding:5px 8px;background:#172840;color:var(--text);font:11px system-ui,sans-serif}button{cursor:pointer}button:hover,button.active{border-color:var(--accent)}#load{white-space:nowrap}#file{display:none}#info{flex:none;padding:6px 14px 7px;border-bottom:1px solid var(--line);background:#0d192a;color:var(--muted);font-size:10.5px;line-height:1.45}#dataset-summary{color:var(--text)}#grouping-summary{color:#c6d2e1}.caveat{margin-top:2px}#views{display:grid;grid-template-columns:1fr 1fr;gap:1px;flex:1;min-height:0;background:var(--line)}.view{position:relative;min-width:0;min-height:0;background:var(--bg)}#three{position:absolute;inset:0}canvas{display:block;width:100%;height:100%}.label{position:absolute;z-index:1;top:10px;left:12px;max-width:calc(100% - 24px);padding:5px 8px;border:1px solid var(--line);border-radius:4px;background:#09111fe8;color:var(--text);font-size:11px;pointer-events:none}.legend{position:absolute;right:10px;bottom:10px;z-index:2;display:flex;flex-direction:column;gap:4px;max-width:225px;padding:8px 9px;border:1px solid var(--line);border-radius:6px;background:#09111fee;color:var(--muted);font-size:9.5px;pointer-events:none}.legend strong{margin-top:2px;color:var(--text);font-size:10px}.legend span{display:flex;align-items:center;gap:6px}.swatch{display:inline-block;width:11px;height:4px;border-radius:3px;background:var(--swatch)}.line-sample{display:inline-block;width:17px;border-radius:4px;background:#d8e7e5}.thin{height:1px;opacity:.45}.thick{height:4px}.gold-sample{background:var(--gold)}.individual-sample{height:2px;opacity:.35}.ramp{height:7px;border-radius:4px;background:linear-gradient(90deg,#3b82f6,#06b6d4,#22c580,#eab308,#f97316,#ef4444)}.ramp-labels{display:flex;justify-content:space-between}#controls{display:flex;flex:none;align-items:center;gap:7px;padding:7px 12px;background:var(--panel);border-top:1px solid var(--line)}#play{min-width:72px}#scrubber{flex:1;min-width:40px;accent-color:var(--accent)}#time{min-width:170px;text-align:center;font:11px ui-monospace,monospace}#status{min-width:118px;text-align:right;color:var(--muted);font-size:10px}.speed{font:11px ui-monospace,monospace}.speed-note{color:var(--muted);font-size:9px;white-space:nowrap}@media(max-width:1050px){.topline{flex-wrap:wrap;gap:6px 12px}#filters{justify-content:flex-start;width:100%}#load{margin-left:auto}}@media(max-width:780px){#views{grid-template-columns:1fr;grid-template-rows:1fr 1fr}.legend{max-width:205px;font-size:9px}#controls{gap:4px;padding:5px}#time{min-width:110px;font-size:10px}.speed-note{display:none}#status{min-width:0;max-width:90px;font-size:9px}}@media(max-width:520px){h1{font-size:14px}header{padding:7px}#filters{gap:6px 8px;font-size:10px}select{max-width:135px}#info{padding:5px 8px;font-size:9px}.legend{max-width:178px;gap:3px;padding:6px;font-size:8px}.label{font-size:9px}#time{min-width:92px}.speed{padding:5px 6px}}
+.phase-legend{display:flex;align-items:center;flex-wrap:wrap;gap:4px 11px;padding-top:4px;color:var(--muted)}.phase-legend strong{color:var(--text)}.phase-legend span{display:inline-flex;align-items:center;gap:4px;white-space:nowrap}.phase-swatch{display:inline-block;width:12px;height:4px;border-radius:3px;background:var(--phase)}#phase-selection{color:var(--text);font-weight:600}.phase-overlay canvas{cursor:pointer}
+</style>
+</head>
+<body class="phase-overlay" data-mode="discrete" data-phase-overlay="true">
+<div id="app">
+<header>
+  <div class="topline">
+    <h1>Discrete-space flight-phase templates</h1>
+    <div id="filters" aria-label="Trajectory filters">
+      <label><input type="checkbox" data-kind="transit" checked> Pass through</label>
+      <label><input type="checkbox" data-kind="departure" checked> Takeoff and exit</label>
+      <label><input type="checkbox" data-kind="arrival" checked> Enter and land</label>
+      <label><input type="checkbox" data-kind="local" checked> Takeoff and land</label>
+      <label>Template tolerance <select id="route-tolerance"><option value="2">Tight · ~10 km</option><option value="4">Balanced · ~20 km</option><option value="7" selected>Broad · ~34 km</option></select></label>
+      <label>Origin (takeoff) <select id="source-airport"><option value="*">All origins</option></select></label>
+      <label>Destination (landing) <select id="destination-airport"><option value="*">All destinations</option></select></label>
+    </div>
+    <button id="load" type="button">Load discrete JSON</button>
+    <input id="file" type="file" accept=".json,application/json">
+  </div>
+</header>
+<section id="info" aria-live="polite">
+  <div id="dataset-summary">Loading export counts…</div>
+  <div id="grouping-summary">XY and XYZ templates are grouped independently; dominant phases follow the current template tolerance.</div>
+  <div class="caveat" id="phase-selection">Click an XY or XYZ template to overlay its segment phases and inspect its dominant-phase share.</div>
+  <div class="phase-legend" aria-label="Route group and flight-phase colors">
+    <strong>Unselected group</strong>
+    <span><i class="swatch" style="--swatch:#4ecdc4"></i>Enter and land</span>
+    <span><i class="swatch" style="--swatch:#f5a65b"></i>Takeoff and exit</span>
+    <span><i class="swatch" style="--swatch:#c792ea"></i>Takeoff and land</span>
+    <span><i class="swatch" style="--swatch:#70a1ff"></i>Pass through</span>
+    <strong>Selected segment</strong> color = local dominant phase:
+    <span><i class="phase-swatch" style="--phase:#9aa9bd"></i>Ground</span>
+    <span><i class="phase-swatch" style="--phase:#ff9f43"></i>Initial climb</span>
+    <span><i class="phase-swatch" style="--phase:#ff5b5b"></i>Climb</span>
+    <span><i class="phase-swatch" style="--phase:#bb86fc"></i>Cruise</span>
+    <span><i class="phase-swatch" style="--phase:#45d6c5"></i>Level flight</span>
+    <span><i class="phase-swatch" style="--phase:#5fa8ff"></i>Descent</span>
+    <span><i class="phase-swatch" style="--phase:#35d49a"></i>Approach</span>
+    <span><i class="phase-swatch" style="--phase:#ffe066"></i>Landing</span>
+    <span><i class="phase-swatch" style="--phase:#f4a261"></i>Landing roll</span>
+    <span><i class="phase-swatch" style="--phase:#ff5ec4"></i>Go-around candidate</span>
+    <span><i class="phase-swatch" style="--phase:#d8e5f2"></i>Airborne transition</span>
+    <span><i class="phase-swatch" style="--phase:#687588"></i>Unknown</span>
+  </div>
+  <div class="caveat">Observed takeoff/landing events are distinct from inferred route endpoints. <span id="edge-note">Edge-band evidence is reported by the loaded export.</span> <span id="quality-note">QC flags remain visible quality information and do not silently remove whole sessions.</span></div>
+  <div class="caveat">Airport filters use event-linked takeoff/touchdown airport codes propagated to sessions; blank codes are unspecified, not guesses from endpoint proximity.</div>
+  <div class="caveat" id="camera-note">Auto frame follows arrival traffic toward the selected landing airport, departure traffic outward from the selected takeoff airport, and the active traffic envelope for other filters. Toggle Auto frame off to retain manual 3D orbit/zoom.</div>
+</section>
+<main id="views">
+  <section class="view">
+    <div class="label">XY · category color by default · click a route for phase-colored segments</div>
+    <canvas id="map" aria-label="XY trajectories and route templates"></canvas>
+    <aside class="legend" aria-label="XY legend">
+      <strong>Template membership</strong>
+      <span><i class="line-sample thin"></i>Lower session share</span>
+      <span><i class="line-sample thick"></i>Higher session share</span>
+      <span><i class="line-sample gold-sample thick"></i>Gold outline = selected path</span>
+      <strong>Faint lines</strong>: individual sessions
+      <strong>Moving dot</strong>: mean position of active members
+      <span>Size = full group membership · color = mean altitude</span>
+      <i class="ramp"></i><span class="ramp-labels"><small>Low</small><small>High</small></span>
+    </aside>
+  </section>
+  <section class="view">
+    <div class="label">XYZ · category color by default · click a route for phase-colored tubes; drag to orbit</div>
+    <div id="three" aria-label="XYZ trajectory templates"></div>
+    <aside class="legend" aria-label="XYZ legend">
+      <strong>Independent XYZ templates</strong>
+      <span>Each tube segment uses its local dominant phase.</span>
+      <strong><i class="line-sample gold-sample thick"></i>Gold outline = selected path</strong>
+      <strong>Faint lines</strong>: individual sessions
+      <strong>Moving dot</strong>: mean position of active members
+      <span>Size = full group membership · color = mean altitude</span>
+      <i class="ramp"></i><span class="ramp-labels"><small>Low</small><small>High</small></span>
+    </aside>
+  </section>
+</main>
+<footer id="controls">
+  <button id="play" type="button">▶ Play</button>
+  <button id="auto-frame" class="active" type="button" aria-pressed="true">Auto frame</button>
+  <button class="speed" data-speed="1" type="button" title="1× real time">1×</button>
+  <button class="speed active" data-speed="4" type="button" title="4× real time">4×</button>
+  <button class="speed" data-speed="16" type="button" title="16× real time">16×</button>
+  <span id="speed-note" class="speed-note">real-time speed · 5 seconds per bin</span>
+  <input id="scrubber" type="range" min="0" max="0" step="1" value="0" aria-label="Session-relative time in five-second bins">
+  <span id="time">t = 0 / 0 s · 5s bins</span>
+  <span id="status">Loading…</span>
+</footer>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="trajectory_analysis.js"></script>
+<script src="trajectory_viewer.js"></script>
+</body>
+</html>
