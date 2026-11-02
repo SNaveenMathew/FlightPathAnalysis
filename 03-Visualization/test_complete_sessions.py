@@ -16,10 +16,87 @@ from complete_sessions import (
     continuous_sessions_to_payload,
     discretize_sessions,
     export_session_payload,
+    load_adsb,
+    phase_session_ids,
 )
 
 
 class CompleteSessionFilterTests(unittest.TestCase):
+    def test_phase_scope_helper_filters_by_airport(self):
+        frame = pd.DataFrame(
+            {
+                "aircraft_session_id": ["A", "B", "C", "D"],
+                "flight_phase_scope": [
+                    "jfk_arrival",
+                    "jfk_departure",
+                    "lga_arrival",
+                    pd.NA,
+                ],
+            }
+        )
+        self.assertEqual(set(phase_session_ids(frame)), {"A", "B"})
+        self.assertEqual(list(phase_session_ids(frame, "LGA")), ["C"])
+
+    def test_phase_sidecar_join_preserves_duplicate_source_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = Path(temp_dir) / "source.feather"
+            tags_path = Path(temp_dir) / "phase_tags.feather"
+            source = pd.DataFrame(
+                {
+                    "aircraft": ["A"] * 3,
+                    "aircraft_session_id": ["A_S1"] * 3,
+                    "ts": [100_000, 100_000, 105_000],
+                    "lon": [-73.5] * 3,
+                    "lat": [40.5] * 3,
+                    "altitude": [3_000] * 3,
+                }
+            )
+            tags = pd.DataFrame(
+                {
+                    "aircraft_session_id": ["A_S1", "A_S1"],
+                    "ts": [100_000, 105_000],
+                    "flight_phase_scope": ["jfk_departure"] * 2,
+                    "flight_phase": ["initial_climb", "climb"],
+                    "flight_phase_changed": [False, True],
+                }
+            )
+            source.to_feather(source_path)
+            tags.to_feather(tags_path)
+
+            joined, _ = load_adsb(source_path, phase_tags_path=tags_path)
+
+        self.assertEqual(len(joined), len(source))
+        self.assertEqual(joined["flight_phase"].tolist(), ["initial_climb", "initial_climb", "climb"])
+        self.assertEqual(joined["flight_phase_changed"].tolist(), [False, False, True])
+
+    def test_phase_sidecar_duplicate_keys_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = Path(temp_dir) / "source.feather"
+            tags_path = Path(temp_dir) / "phase_tags.feather"
+            pd.DataFrame(
+                {
+                    "aircraft": ["A"],
+                    "aircraft_session_id": ["A_S1"],
+                    "ts": [100_000],
+                    "lon": [-73.5],
+                    "lat": [40.5],
+                    "altitude": [3_000],
+                }
+            ).to_feather(source_path)
+            tags = pd.DataFrame(
+                {
+                    "aircraft_session_id": ["A_S1", "A_S1"],
+                    "ts": [100_000, 100_000],
+                    "flight_phase_scope": ["jfk_departure"] * 2,
+                    "flight_phase": ["climb"] * 2,
+                    "flight_phase_changed": [False, False],
+                }
+            )
+            tags.to_feather(tags_path)
+
+            with self.assertRaisesRegex(ValueError, "duplicate join keys"):
+                load_adsb(source_path, phase_tags_path=tags_path)
+
     def test_airport_locations_use_exported_iata_codes(self):
         fields = ["KJFK", "JFK"] + ["unused"] * 12 + ["40.6413", "-73.7781"]
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -320,6 +397,79 @@ class CompleteSessionFilterTests(unittest.TestCase):
         self.assertEqual(
             min(point[3] for point in continuous["sessions"][0]["points"]), 0
         )
+
+
+class FlightPhaseExportTests(unittest.TestCase):
+    def setUp(self):
+        self.frame = pd.DataFrame(
+            {
+                "aircraft": ["A"] * 3,
+                "aircraft_session_id": ["A_S1"] * 3,
+                "aircraft_session_type": ["S1"] * 3,
+                "ts": [100_000, 105_000, 110_000],
+                "lon": [-73.5] * 3,
+                "lat": [40.5] * 3,
+                "altitude": [3_000] * 3,
+                "altitude_phase_ft": [3_000] * 3,
+                "n_to_session": [1] * 3,
+                "n_ld_session": [1] * 3,
+                "track_segment_id": ["A_T1"] * 3,
+                "flight_phase_scope": ["jfk_departure"] * 3,
+                "flight_phase": ["climb", "climb", "cruise"],
+                "flight_phase_detail": ["", "", ""],
+                "flight_phase_confidence": [0.8, 0.9, 0.9],
+                "flight_phase_changed": [False, False, True],
+                "flight_phase_event": ["", "", "phase_changed"],
+                "flight_phase_model_version": ["causal_adsb_phase_v1"] * 3,
+                "flight_phase_is_causal": [True] * 3,
+            }
+        )
+        self.keep, self.summary, self.box = complete_session_ids(self.frame)
+        self.assertEqual(list(self.keep), ["A_S1"])
+
+    def test_change_flag_and_intervals_survive_both_export_modes(self):
+        bins = {"dx": 1.0, "dy": 1.0, "dz": 5_000.0, "dt": 5.0}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for mode, filename in (
+                ("discrete", "discrete.json"),
+                ("continuous", "continuous.json"),
+            ):
+                output, meta = export_session_payload(
+                    self.frame,
+                    "synthetic.feather",
+                    self.keep,
+                    self.summary,
+                    self.box,
+                    mode=mode,
+                    bins=bins,
+                    out_path=Path(temp_dir) / filename,
+                    phase_airport="JFK",
+                )
+                payload = json.loads(output.read_text(encoding="utf-8"))
+                session = payload["sessions"][0]
+
+                self.assertEqual(
+                    [sample["changed"] for sample in session["phase_samples"]],
+                    [False, False, True],
+                )
+                self.assertEqual(
+                    [sample["phase"] for sample in session["phase_samples"]],
+                    ["climb", "climb", "cruise"],
+                )
+                self.assertEqual(
+                    [sample["time_s"] for sample in session["phase_samples"]],
+                    [0.0, 5.0, 10.0],
+                )
+                self.assertEqual(len(session["phase_intervals"]), 2)
+                self.assertEqual(session["phase_intervals"][0]["n_points"], 2)
+                self.assertEqual(session["phase_intervals"][1]["phase"], "cruise")
+                self.assertEqual(meta["phase_inference"]["n_exported_phase_samples"], 3)
+                self.assertEqual(meta["phase_inference"]["n_exported_phase_changes"], 1)
+                if mode == "discrete":
+                    self.assertEqual(session["n_points"], 3)
+                    self.assertEqual(len(session["occ"]), 3)
+                else:
+                    self.assertEqual(len(session["points"]), 3)
 
 
 if __name__ == "__main__":

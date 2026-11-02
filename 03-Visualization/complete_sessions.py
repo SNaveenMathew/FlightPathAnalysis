@@ -10,6 +10,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.feather as feather
 
 # Sector and edge band configured by 02-Preprocessing/01-label_aircraft_id.ipynb.
@@ -34,6 +35,25 @@ QC_FLAG_COLUMNS = (
     "altitude_jump_suspect_flag",
     "altitude_spike_suspect_flag",
     "altitude_ceiling_flag",
+)
+PHASE_TAG_COLUMNS = (
+    "flight_phase_scope",
+    "flight_phase",
+    "flight_phase_detail",
+    "flight_phase_confidence",
+    "flight_phase_changed",
+    "flight_phase_event",
+    "flight_phase_evidence",
+    "flight_phase_vertical_rate_fpm",
+    "flight_phase_distance_to_airport_nm",
+    "flight_phase_closure_rate_kts",
+    "flight_phase_model_version",
+    "flight_phase_is_causal",
+)
+DEFAULT_PHASE_TAGS_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "02-Preprocessing"
+    / "jfk_flight_phase_tags.feather"
 )
 
 NEEDED_COLS = [
@@ -170,16 +190,96 @@ def resolve_feather_path(explicit: str | Path | None = None) -> Path:
     )
 
 
-def load_adsb(feather_path: str | Path | None = None) -> tuple[pd.DataFrame, Path]:
-    path = resolve_feather_path(feather_path)
+def _attach_phase_tags(
+    df: pd.DataFrame,
+    phase_tags_path: str | Path | None = DEFAULT_PHASE_TAGS_PATH,
+) -> pd.DataFrame:
+    if phase_tags_path is None:
+        for column in PHASE_TAG_COLUMNS:
+            df[column] = pd.NA
+        df["flight_phase_changed"] = df["flight_phase_changed"].astype("boolean")
+        df["flight_phase_is_causal"] = df["flight_phase_is_causal"].astype("boolean")
+        return df
+
+    path = Path(phase_tags_path)
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Missing phase sidecar {path}. Run "
+            "02-Preprocessing/02-tag_flight_phases.py first, or pass "
+            "phase_tags_path=None to explicitly export without phase tags."
+        )
     table = feather.read_table(path, memory_map=False)
+    available = set(table.schema.names)
+    required = {
+        "aircraft_session_id",
+        "ts",
+        "flight_phase_scope",
+        "flight_phase",
+        "flight_phase_changed",
+    }
+    missing = required - available
+    if missing:
+        raise ValueError(f"{path} is missing required phase columns: {sorted(missing)}")
+    columns = [
+        "aircraft_session_id",
+        "ts",
+        *(column for column in PHASE_TAG_COLUMNS if column in available),
+    ]
+    tags = feather.read_table(path, columns=columns, memory_map=False).to_pandas()
+    tags["ts"] = pd.to_numeric(tags["ts"], errors="coerce")
+    keys = ["aircraft_session_id", "ts"]
+    duplicate_keys = tags.duplicated(keys, keep=False)
+    if duplicate_keys.any():
+        examples = tags.loc[duplicate_keys, keys].head(5).to_dict("records")
+        raise ValueError(
+            f"Phase sidecar {path} has duplicate join keys: {examples}"
+        )
+
+    collisions = [column for column in PHASE_TAG_COLUMNS if column in df.columns]
+    if collisions:
+        df = df.drop(columns=collisions)
+    merged = df.merge(
+        tags,
+        on=keys,
+        how="left",
+        validate="many_to_one",
+        sort=False,
+    )
+    merged["flight_phase_changed"] = merged["flight_phase_changed"].astype("boolean")
+    if "flight_phase_is_causal" in merged.columns:
+        merged["flight_phase_is_causal"] = merged["flight_phase_is_causal"].astype("boolean")
+    return merged
+
+
+def phase_session_ids(
+    df: pd.DataFrame,
+    airport_code: str = "JFK",
+) -> pd.Index:
+    """Return sessions that have phase tags scoped to the requested airport."""
+    if "aircraft_session_id" not in df.columns or "flight_phase_scope" not in df.columns:
+        return pd.Index([], dtype="object")
+    prefix = f"{airport_code.strip().lower()}_"
+    scope = df["flight_phase_scope"].astype("string").str.lower()
+    mask = scope.str.startswith(prefix, na=False)
+    return pd.Index(df.loc[mask, "aircraft_session_id"].dropna().astype(str).unique())
+
+
+def load_adsb(
+    feather_path: str | Path | None = None,
+    phase_tags_path: str | Path | None = DEFAULT_PHASE_TAGS_PATH,
+) -> tuple[pd.DataFrame, Path]:
+    path = resolve_feather_path(feather_path)
+    try:
+        table = feather.read_table(path, columns=NEEDED_COLS, memory_map=False)
+    except pa.ArrowInvalid:
+        table = feather.read_table(path, memory_map=False)
     names = set(table.schema.names)
     required = {"aircraft_session_id", "ts", "lon", "lat", "altitude"}
     missing = required - names
     if missing:
         raise ValueError(f"{path} is missing required columns: {sorted(missing)}")
     cols = [column for column in NEEDED_COLS if column in names]
-    df = feather.read_table(path, columns=cols, memory_map=False).to_pandas()
+    df = table.select(cols).to_pandas()
     for column in (
         "ts", "lon", "lat", "altitude", "altitude_raw_ft",
         "altitude_phase_ft", "sample_gap_ms",
@@ -209,6 +309,10 @@ def load_adsb(feather_path: str | Path | None = None) -> tuple[pd.DataFrame, Pat
     ):
         if column not in df.columns:
             df[column] = False if column in {"takeoff", "touchdown"} else pd.NA
+    df = _attach_phase_tags(df, phase_tags_path)
+    df.attrs["phase_tags_path"] = (
+        str(phase_tags_path) if phase_tags_path is not None else None
+    )
     return df, path
 
 
@@ -512,6 +616,8 @@ def _trajectory_rows(
         "altitude_invalid_flag",
         "altitude_range_flag",
         "altitude_ceiling_flag",
+        "track_segment_id",
+        *PHASE_TAG_COLUMNS,
     ]
     available = [column for column in columns if column in df.columns]
     selected = df.loc[
@@ -540,6 +646,140 @@ def _trajectory_rows(
     return selected.sort_values(
         ["aircraft_session_id", "ts"], kind="mergesort"
     )
+
+
+def _nullable_string(value: Any) -> str | None:
+    return None if pd.isna(value) else str(value)
+
+
+def _nullable_float(value: Any) -> float | None:
+    if pd.isna(value):
+        return None
+    number = float(value)
+    return number if np.isfinite(number) else None
+
+
+def _nullable_bool(value: Any) -> bool | None:
+    return None if pd.isna(value) else bool(value)
+
+
+def _phase_payload(group: pd.DataFrame) -> dict[str, list[dict[str, Any]]]:
+    empty = {"phase_samples": [], "phase_intervals": []}
+    if "flight_phase_scope" not in group or not group["flight_phase_scope"].notna().any():
+        return empty
+
+    times = pd.to_numeric(group["ts"], errors="coerce").to_numpy(dtype=float)
+    if len(times) == 0 or not np.isfinite(times).all():
+        return empty
+    relative_seconds = (times - times[0]) / 1000.0
+    phases = (
+        group["flight_phase"].tolist()
+        if "flight_phase" in group.columns
+        else [pd.NA] * len(group)
+    )
+    details = (
+        group["flight_phase_detail"].tolist()
+        if "flight_phase_detail" in group.columns
+        else [pd.NA] * len(group)
+    )
+    confidences = (
+        group["flight_phase_confidence"].tolist()
+        if "flight_phase_confidence" in group.columns
+        else [pd.NA] * len(group)
+    )
+    changed = (
+        group["flight_phase_changed"].tolist()
+        if "flight_phase_changed" in group.columns
+        else [pd.NA] * len(group)
+    )
+    events = (
+        group["flight_phase_event"].tolist()
+        if "flight_phase_event" in group.columns
+        else [pd.NA] * len(group)
+    )
+    scopes = group["flight_phase_scope"].tolist()
+    segments = (
+        group["track_segment_id"].tolist()
+        if "track_segment_id" in group.columns
+        else [pd.NA] * len(group)
+    )
+
+    samples = []
+    for index, relative_time in enumerate(relative_seconds):
+        samples.append(
+            {
+                "time_s": float(relative_time),
+                "phase": _nullable_string(phases[index]),
+                "detail": _nullable_string(details[index]),
+                "confidence": _nullable_float(confidences[index]),
+                "changed": _nullable_bool(changed[index]),
+                "event": _nullable_string(events[index]),
+                "scope": _nullable_string(scopes[index]),
+                "segment_id": _nullable_string(segments[index]),
+            }
+        )
+
+    intervals = []
+    start = 0
+    for index in range(1, len(group) + 1):
+        previous_key = (
+            _nullable_string(phases[index - 1]),
+            _nullable_string(segments[index - 1]),
+        )
+        next_key = (
+            (_nullable_string(phases[index]), _nullable_string(segments[index]))
+            if index < len(group)
+            else None
+        )
+        if next_key == previous_key:
+            continue
+        intervals.append(
+            {
+                "phase": previous_key[0],
+                "segment_id": previous_key[1],
+                "start_sample_s": float(relative_seconds[start]),
+                "end_sample_s": float(relative_seconds[index - 1]),
+                "n_points": index - start,
+            }
+        )
+        start = index
+
+    return {"phase_samples": samples, "phase_intervals": intervals}
+
+
+def _phase_inference_metadata(df: pd.DataFrame, airport_code: str | None) -> dict[str, Any]:
+    if "flight_phase_model_version" in df.columns:
+        versions = sorted(
+            df["flight_phase_model_version"].dropna().astype(str).unique().tolist()
+        )
+    else:
+        versions = []
+    if "flight_phase_scope" in df.columns:
+        scopes = sorted(df["flight_phase_scope"].dropna().astype(str).unique().tolist())
+    else:
+        scopes = []
+    return {
+        "status": "adsb_estimate" if versions else "unavailable",
+        "model_versions": versions,
+        "airport_filter": airport_code,
+        "scopes_present": scopes,
+        "phase_change_flag": (
+            "flight_phase_changed is true when this observation's estimated phase "
+            "differs from the preceding observation in the same track segment; "
+            "it is false at each segment start."
+        ),
+        "phase_sample_time": (
+            "Exact observed time relative to the first exported point, in seconds; "
+            "not the discretized time bin."
+        ),
+        "phase_interval_time": (
+            "Intervals report the first and last observed sample times for each "
+            "phase run; they are not asserted physical transition times."
+        ),
+        "operational_note": (
+            "Estimates are for analysis and are not certified ATC decision support."
+        ),
+    }
 
 
 def discretize_sessions(
@@ -583,6 +823,10 @@ def discretize_sessions(
     occ.attrs["n_points_by_session"] = {
         str(session_id): int(count)
         for session_id, count in sub.groupby("aircraft_session_id", sort=False).size().items()
+    }
+    occ.attrs["phase_data_by_session"] = {
+        str(session_id): _phase_payload(group)
+        for session_id, group in sub.groupby("aircraft_session_id", sort=False)
     }
     return occ
 
@@ -634,7 +878,10 @@ def occupancy_to_payload(
 ) -> dict[str, Any]:
     sessions = []
     voxel_hits: dict[tuple[int, int, int], list[dict[str, Any]]] = defaultdict(list)
-    n_points_by_session = occ.attrs.get("n_points_by_session", {})
+    n_points_by_session = occ.attrs.pop("n_points_by_session", {})
+    phase_data_by_session = occ.attrs.pop("phase_data_by_session", {})
+    n_in_sector_points = int(occ.attrs.pop("n_in_sector_points", 0))
+    occ.attrs.clear()
     for sid, group in occ.groupby("aircraft_session_id", sort=False, dropna=False):
         meta = summary.loc[sid] if sid in summary.index else None
         ix = group["ix"].to_numpy(dtype=np.int32, copy=False)
@@ -643,6 +890,9 @@ def occupancy_to_payload(
         it = group["it"].to_numpy(dtype=np.int32, copy=False)
         session_occ = np.column_stack([ix, iy, iz, it])
         session_id = str(sid)
+        phase_data = phase_data_by_session.get(
+            session_id, {"phase_samples": [], "phase_intervals": []}
+        )
         for vx, vy, vz, vt in session_occ:
             voxel_hits[(int(vx), int(vy), int(vz))].append(
                 {"session_id": session_id, "it": int(vt)}
@@ -673,6 +923,7 @@ def occupancy_to_payload(
                 "t_max": float(group["t"].max()),
                 "n_occ": int(len(group)),
                 "occ": session_occ.tolist(),
+                **phase_data,
             }
         )
     return {
@@ -682,8 +933,8 @@ def occupancy_to_payload(
             "sector_source": "preprocessor_config",
             "bins": bins,
             "n_sessions": len(sessions),
-            "n_in_sector_points": int(
-                occ.attrs.get("n_in_sector_points", sum(s["n_points"] for s in sessions))
+            "n_in_sector_points": n_in_sector_points or sum(
+                session["n_points"] for session in sessions
             ),
             "n_occupancy": int(len(occ)),
         },
@@ -743,6 +994,7 @@ def continuous_sessions_to_payload(
                 "t_max": int(points[-1][3]) if points else 0,
                 "n_points": len(points),
                 "points": points,
+                **_phase_payload(group),
             }
         )
 
@@ -769,6 +1021,7 @@ def export_session_payload(
     mode: str = "discrete",
     bins: dict[str, float] | None = None,
     out_path: str | Path | None = None,
+    phase_airport: str | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     if mode not in {"discrete", "continuous"}:
         raise ValueError("mode must be either 'discrete' or 'continuous'")
@@ -783,6 +1036,20 @@ def export_session_payload(
             df, session_ids, summary, box, bins["dt"], source
         )
         default_name = "continuous_sessions.json"
+
+    phase_metadata = _phase_inference_metadata(df, phase_airport)
+    phase_sessions = payload.get("sessions", [])
+    phase_metadata["n_exported_phase_samples"] = int(
+        sum(len(session.get("phase_samples", [])) for session in phase_sessions)
+    )
+    phase_metadata["n_exported_phase_changes"] = int(
+        sum(
+            sample.get("changed") is True
+            for session in phase_sessions
+            for sample in session.get("phase_samples", [])
+        )
+    )
+    payload["meta"]["phase_inference"] = phase_metadata
 
     selected_summary = summary.reindex(pd.Index(session_ids))
     payload["meta"]["n_sessions_by_kind"] = {
@@ -848,13 +1115,32 @@ def export_complete_sessions(
     random_state: int = 0,
     mode: str = "discrete",
     min_points: int = MIN_PTS_PER_SESSION,
+    phase_airport: str | None = "JFK",
+    phase_tags_path: str | Path | None = DEFAULT_PHASE_TAGS_PATH,
 ) -> tuple[Path, pd.DataFrame, dict[str, Any]]:
-    df, source = load_adsb(feather_path)
+    df, source = load_adsb(feather_path, phase_tags_path=phase_tags_path)
     keep, summary, box = complete_session_ids(df, min_points=min_points)
+    if phase_airport is not None:
+        tagged_ids = phase_session_ids(df, phase_airport)
+        summary = summary.loc[summary.index.isin(tagged_ids)].copy()
+        keep = keep[keep.isin(summary.index)]
+        if keep.empty:
+            raise ValueError(
+                f"No complete sessions have {phase_airport.upper()} phase tags; "
+                "run the phase tagger or set phase_airport=None for an unfiltered export."
+            )
     if max_sessions is not None and len(keep) > max_sessions:
         keep = summary.loc[keep].sample(n=max_sessions, random_state=random_state).index
     output, meta = export_session_payload(
-        df, source, keep, summary, box, mode=mode, bins=bins, out_path=out_path
+        df,
+        source,
+        keep,
+        summary,
+        box,
+        mode=mode,
+        bins=bins,
+        out_path=out_path,
+        phase_airport=phase_airport,
     )
     return output, summary, meta
 
@@ -890,6 +1176,27 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=None, help="Output JSON path")
     parser.add_argument("--max-sessions", type=int, default=None, help="Optional random session cap")
     parser.add_argument(
+        "--phase-tags",
+        type=Path,
+        default=DEFAULT_PHASE_TAGS_PATH,
+        help="Keyed phase sidecar (default: JFK tags from preprocessing)",
+    )
+    parser.add_argument(
+        "--no-phase-tags",
+        action="store_true",
+        help="Explicitly export without phase tags (combine with --all-sessions)",
+    )
+    parser.add_argument(
+        "--airport",
+        default="JFK",
+        help="Export complete sessions tagged for this airport (default: JFK)",
+    )
+    parser.add_argument(
+        "--all-sessions",
+        action="store_true",
+        help="Do not restrict output to phase-tagged sessions",
+    )
+    parser.add_argument(
         "--min-points",
         type=int,
         default=MIN_PTS_PER_SESSION,
@@ -908,6 +1215,8 @@ def main() -> None:
         max_sessions=args.max_sessions,
         mode=args.mode,
         min_points=args.min_points,
+        phase_airport=None if args.all_sessions else args.airport,
+        phase_tags_path=None if args.no_phase_tags else args.phase_tags,
     )
     counts, drops = completeness_counts(summary)
     input_name = meta.get("source", meta.get("source_file", "unknown"))
