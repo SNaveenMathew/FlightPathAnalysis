@@ -30,7 +30,7 @@
 <section id="info" aria-live="polite">
   <div id="dataset-summary">Loading export counts…</div>
   <div id="grouping-summary">XY and XYZ templates are grouped independently.</div>
-  <div class="caveat" id="phase-selection">Click an XY or XYZ template to overlay its segment phases and inspect its dominant-phase share.</div>
+  <div class="caveat" id="phase-selection">Click an XY or XYZ template to overlay segment phases. Segment width/brightness reflects local section traffic; the percentage uses the full-route group.</div>
   <div class="phase-legend" aria-label="Flight-phase colors shown on selected routes">
     <strong>Selected segment phase</strong>
     <span><i class="phase-swatch" style="--phase:#9aa9bd"></i>Ground</span>
@@ -48,11 +48,11 @@
   </div>
   <div class="caveat">Observed takeoff/landing events are distinct from inferred route endpoints. <span id="edge-note">Edge-band evidence is reported by the loaded export.</span> <span id="quality-note">QC flags remain visible quality information and do not silently remove whole sessions.</span></div>
   <div class="caveat">Airport filters use event-linked takeoff/touchdown airport codes propagated to sessions; blank codes are unspecified, not guesses from endpoint proximity.</div>
-  <div class="caveat" id="camera-note">Auto frame follows arrival traffic toward the selected landing airport, departure traffic outward from the selected takeoff airport, and the active traffic envelope for other filters. Toggle Auto frame off to retain manual 3D orbit/zoom.</div>
+  <div class="caveat" id="camera-note">Auto frame follows arrival traffic toward the selected landing airport, departure traffic outward from the selected takeoff airport, and the active traffic envelope for other filters. Zoom −/+ adjusts both views while Auto frame continues tracking; turn Auto frame off for manual 3D orbit.</div>
 </section>
 <main id="views">
   <section class="view">
-    <div class="label">XY · category color by default · click a route to overlay its flight phases</div>
+    <div class="label">XY · category hue by default · local section traffic controls width/brightness · click for phases</div>
     <canvas id="map" aria-label="XY trajectories and route templates"></canvas>
     <aside class="legend" aria-label="XY legend">
       <strong>Template category</strong>
@@ -61,8 +61,8 @@
       <span><i class="swatch" style="--swatch:#c792ea"></i>Takeoff and land</span>
       <span><i class="swatch" style="--swatch:#70a1ff"></i>Pass through</span>
       <strong><i class="line-sample individual-sample"></i> Faint lines: individual sessions</strong>
-      <span><i class="line-sample thin"></i>Thin template</span>
-      <span><i class="line-sample thick"></i>More members = wider/brighter</span>
+      <span><i class="line-sample thin"></i>Fewer sessions through section</span>
+      <span><i class="line-sample thick"></i>More local traffic = wider/brighter</span>
       <span><i class="line-sample gold-sample thick"></i>Gold: selected route, otherwise largest XY/XYZ overlap</span>
       <strong>Moving dot: mean position of active members</strong>
       <span>Size = full group membership · color = mean altitude</span>
@@ -70,11 +70,11 @@
     </aside>
   </section>
   <section class="view">
-    <div class="label">XYZ · category color by default · click a route to overlay its flight phases; drag to orbit</div>
+    <div class="label">XYZ · category hue by default · local section traffic controls tubes · click for phases; drag to orbit</div>
     <div id="three" aria-label="XYZ trajectory templates"></div>
     <aside class="legend" aria-label="XYZ legend">
       <strong>Independent XYZ grouping</strong>
-      <span>Category hue · brightness reflects template membership</span>
+      <span>Category/phase hue · local section traffic controls tube width and brightness</span>
       <strong><i class="line-sample individual-sample"></i> Faint lines: individual sessions</strong>
       <span><i class="line-sample gold-sample thick"></i>Gold: selected route, otherwise largest XY/XYZ overlap</span>
       <strong>Moving dot: mean position of active members</strong>
@@ -86,6 +86,8 @@
 <footer id="controls">
   <button id="play" type="button">▶ Play</button>
   <button id="auto-frame" class="active" type="button" aria-pressed="true">Auto frame</button>
+  <button id="zoom-out" type="button" title="Zoom out both views" aria-label="Zoom out">−</button>
+  <button id="zoom-in" type="button" title="Zoom in both views" aria-label="Zoom in">+</button>
   <button class="speed" data-speed="1" type="button" title="1× real time">1×</button>
   <button class="speed active" data-speed="4" type="button" title="4× real time">4×</button>
   <button class="speed" data-speed="16" type="button" title="16× real time">16×</button>

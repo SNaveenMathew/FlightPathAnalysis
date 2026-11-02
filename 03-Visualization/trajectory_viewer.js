@@ -12,6 +12,8 @@
   const baseContext = mapBase.getContext('2d');
   const slider = document.getElementById('scrubber');
   const autoFrameButton = document.getElementById('auto-frame');
+  const zoomOutButton = document.getElementById('zoom-out');
+  const zoomInButton = document.getElementById('zoom-in');
   const timeLabel = document.getElementById('time');
   const status = document.getElementById('status');
   const speedNote = document.getElementById('speed-note');
@@ -24,7 +26,7 @@
   const destinationFilter = document.getElementById('destination-airport');
   const toleranceSelector = document.querySelector('#route-tolerance, #tolerance');
   const kindInputs = [...document.querySelectorAll('#filters input[data-kind]')];
-  const state = { t: 0, max: 0, speed: 4, playing: false, lastFrame: 0, autoFrame: true };
+  const state = { t: 0, max: 0, speed: 4, playing: false, lastFrame: 0, autoFrame: true, zoomFactor: 1 };
   const sessions = [];
   const categoryColors = {
     arrival: '#4ecdc4',
@@ -113,7 +115,7 @@
     if (!phaseOverlay || !phaseSelection) return;
     if (!selectedXYGroup && !selectedXYZGroup) {
       phaseSelection.textContent =
-        'Click an XY or XYZ template to overlay its segment-by-segment dominant phases and inspect its path-wide dominant-phase share. Click empty XY space to clear the selection.';
+        'Click an XY or XYZ template to overlay its segment phases and inspect its path-wide dominant-phase share. Segment width/brightness reflects all filtered sessions passing through that local section; the percentage is within the full-route group. Click empty XY space to clear the selection.';
       return;
     }
     phaseSelection.textContent = [
@@ -335,30 +337,36 @@
 
       const selected = group === selectedXYGroup;
       const highlighted = group === sharedPair.xyGroup;
-      const share = Math.min(1, group.members.length / visibleCount);
-      const width = (1.1 + 5.2 * Math.sqrt(share)) * zoomWeight * pixelRatio;
-      const alpha = 0.24 + 0.76 * Math.sqrt(share);
+      const profile = group.trafficProfile || group.profile;
       mapContext.lineCap = 'round';
       mapContext.lineJoin = 'round';
-      if (!selected) {
-        mapContext.strokeStyle = highlighted ? gold : categoryColor(group.kind);
-        mapContext.globalAlpha = highlighted ? 1 : alpha;
-        mapContext.lineWidth = width;
-        drawPath(mapContext, group.profile, 2, mapPosition);
-        continue;
-      }
+      for (let index = 1; index < profile.length; index += 1) {
+        const support = group.segmentTraffic?.[index - 1];
+        const share = support?.share ?? group.members.length / visibleCount;
+        const density = Math.sqrt(Math.max(0, Math.min(1, share)));
+        const width = (0.8 + 5.2 * density) * zoomWeight * pixelRatio;
+        const alpha = 0.2 + 0.8 * density;
+        const start = mapPosition(profile[index - 1]);
+        const end = mapPosition(profile[index]);
+        if (selected) {
+          mapContext.beginPath();
+          mapContext.moveTo(start.x, start.y);
+          mapContext.lineTo(end.x, end.y);
+          mapContext.strokeStyle = gold;
+          mapContext.globalAlpha = 0.92;
+          mapContext.lineWidth = width + 4 * pixelRatio;
+          mapContext.stroke();
+        }
 
-      mapContext.strokeStyle = gold;
-      mapContext.globalAlpha = 0.95;
-      mapContext.lineWidth = width + 4 * pixelRatio;
-      drawPath(mapContext, group.profile, 2, mapPosition);
-      for (let index = 1; index < group.profile.length; index += 1) {
-        const start = mapPosition(group.profile[index - 1]);
-        const end = mapPosition(group.profile[index]);
+        const parentIndex = group.trafficSegmentParents?.[index - 1] ?? index - 1;
         mapContext.beginPath();
         mapContext.moveTo(start.x, start.y);
         mapContext.lineTo(end.x, end.y);
-        mapContext.strokeStyle = phaseColor(group.phaseSegments?.[index - 1]?.phase);
+        mapContext.strokeStyle = selected
+          ? phaseColor(group.phaseSegments?.[parentIndex]?.phase)
+          : highlighted
+            ? gold
+            : categoryColor(group.kind);
         mapContext.globalAlpha = alpha;
         mapContext.lineWidth = width;
         mapContext.stroke();
@@ -488,19 +496,25 @@
     }
   }
 
-  function phaseTubeMesh(group, transform, radius, strength, colorOverride = null) {
+  function phaseTubeMesh(group, transform, colorOverride = null, outline = false) {
     const positions = [];
     const colors = [];
-    for (let index = 1; index < group.profile.length; index += 1) {
-      const phase = group.phaseSegments?.[index - 1]?.phase || 'unknown';
+    const profile = group.trafficProfile || group.profile;
+    for (let index = 1; index < profile.length; index += 1) {
+      const support = group.segmentTraffic?.[index - 1];
+      const share = Math.max(0, Math.min(1, support?.share || 0));
+      const density = Math.sqrt(share);
+      const radius = 0.035 + 0.55 * density + (outline ? 0.14 : 0);
+      const phaseIndex = group.trafficSegmentParents?.[index - 1] ?? index - 1;
+      const phase = group.phaseSegments?.[phaseIndex]?.phase || 'unknown';
       const color = colorOverride || phaseColor(phase);
       const source = new THREE.Color(color);
-      const tint = `#${source.multiplyScalar(strength).getHexString()}`;
+      const tint = `#${source.multiplyScalar(0.3 + 0.7 * density).getHexString()}`;
       appendTubeSegment(
         positions,
         colors,
-        worldToThree(group.profile[index - 1], transform),
-        worldToThree(group.profile[index], transform),
+        worldToThree(profile[index - 1], transform),
+        worldToThree(profile[index], transform),
         radius,
         tint,
       );
@@ -510,8 +524,8 @@
       new THREE.MeshBasicMaterial({
         vertexColors: true,
         transparent: true,
-        opacity: colorOverride ? 0.9 : 0.55 + 0.42 * Math.sqrt(strength),
-        depthWrite: !colorOverride,
+        opacity: outline ? 0.95 : 0.9,
+        depthWrite: false,
         side: THREE.DoubleSide,
       }),
     );
@@ -559,21 +573,15 @@
 
     if (phaseOverlay) {
       routeObject = new THREE.Group();
-      const denominator = Math.max(1, visible.length);
       for (const group of xyzGroups) {
-        const share = Math.min(1, group.members.length / denominator);
         const selected = group === selectedXYZGroup;
-        const strength = 0.45 + 0.55 * Math.sqrt(share);
-        const radius = 0.05 + 0.65 * Math.sqrt(share);
         if (selected) {
-          routeObject.add(phaseTubeMesh(group, transform, radius + 0.12, 1, gold));
+          routeObject.add(phaseTubeMesh(group, transform, gold, true));
         }
         const categoryHighlight = !selected && group === sharedPair.xyzGroup;
         const mesh = phaseTubeMesh(
           group,
           transform,
-          radius,
-          strength,
           selected ? null : categoryHighlight ? gold : categoryColor(group.kind),
         );
         routePickTargets.push(mesh);
@@ -780,13 +788,14 @@
     });
     if (!target) return;
 
+    const targetZoom = Math.max(0.2, Math.min(12, target.zoom * state.zoomFactor));
     const alpha = snap || !cameraFrame.initialized
       ? 1
       : 1 - Math.exp(-Math.max(0.016, elapsedSeconds) / 0.45);
     cameraFrame.center = cameraFrame.center.map(
       (value, axis) => value + (target.center[axis] - value) * alpha,
     );
-    cameraFrame.zoom += (target.zoom - cameraFrame.zoom) * alpha;
+    cameraFrame.zoom += (targetZoom - cameraFrame.zoom) * alpha;
     cameraFrame.initialized = true;
     mapView = {
       x: cameraFrame.center[0],
@@ -807,6 +816,25 @@
     autoFrameButton.classList.toggle('active', enabled);
     autoFrameButton.setAttribute('aria-pressed', String(enabled));
     if (enabled) update(0.2, true);
+  }
+
+  function zoomBy(factor) {
+    if (!Number.isFinite(factor) || factor <= 0) return;
+    if (state.autoFrame) {
+      state.zoomFactor = Math.max(0.25, Math.min(4, state.zoomFactor * factor));
+      update(0.2, true);
+      return;
+    }
+
+    const zoom = Math.max(0.2, Math.min(12, mapView.zoom * factor));
+    mapView = { ...mapView, zoom };
+    cameraFrame.zoom = zoom;
+    if (orbit) {
+      orbit.radius = Math.max(8, Math.min(1500, orbit.radius / factor));
+      orbit.update();
+    }
+    drawMap();
+    if (renderer && scene) renderer.render(scene, camera);
   }
 
   function update3dMarkers(transform = worldTransform()) {
@@ -878,7 +906,7 @@
     if (phaseOverlay) {
       groupingSummary.textContent =
         `Independent grouping: ${xyGroups.length} XY / ${xyzGroups.length} XYZ templates. ` +
-        `Phase votes and membership share are recalculated for the current filters and tolerance.`;
+        `Phase votes and local section traffic support are recalculated for the current filters and tolerance.`;
     } else {
       const sharedText = sharedPair.count
         ? `${sharedPair.count.toLocaleString()} sessions shared by the most-overlapping XY/XYZ template pair`
@@ -900,6 +928,17 @@
   function regroup() {
     const visible = visibleSessions();
     const tolerance = projectTolerance();
+    const previousProgress = state.max > 0
+      ? Math.max(0, Math.min(1, state.t / state.max))
+      : 0;
+    state.max = visible.reduce(
+      (maximum, session) => Math.max(maximum, Number(sessionPoints(session).at(-1)?.[3]) || 0),
+      0,
+    );
+    state.t = state.max * previousProgress;
+    state.lastFrame = 0;
+    slider.max = String(state.max);
+    slider.value = String(Math.floor(state.t));
     selectedXYGroup = null;
     selectedXYZGroup = null;
     const phaseOptions = phaseOverlay ? { phaseProfileOf } : {};
@@ -917,6 +956,21 @@
       projectPoint: pointWorld,
       ...phaseOptions,
     });
+    if (phaseOverlay) {
+      const trafficOptions = {
+        tolerance,
+        pointsOf: sessionPoints,
+        projectPoint: pointWorld,
+      };
+      Analysis.assignSegmentTraffic(xyGroups, visible, {
+        ...trafficOptions,
+        dimensions: 2,
+      });
+      Analysis.assignSegmentTraffic(xyzGroups, visible, {
+        ...trafficOptions,
+        dimensions: 3,
+      });
+    }
     sharedPair = Analysis.findLargestSharedPair(xyGroups, xyzGroups);
     drawMapBase();
     build3dRoutes();
@@ -1110,6 +1164,8 @@
 
   document.getElementById('play').addEventListener('click', togglePlayback);
   autoFrameButton.addEventListener('click', () => setAutoFrame(!state.autoFrame));
+  zoomOutButton.addEventListener('click', () => zoomBy(1 / 1.2));
+  zoomInButton.addEventListener('click', () => zoomBy(1.2));
   if (phaseOverlay) map.addEventListener('click', selectXYPath);
   document.querySelectorAll('.speed').forEach((button) => {
     button.addEventListener('click', () => {

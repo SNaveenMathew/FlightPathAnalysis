@@ -271,6 +271,128 @@
     return groups;
   }
 
+  function pointSegmentDistanceSquared(point, start, end, dimensions) {
+    let lengthSquared = 0;
+    let projection = 0;
+    for (let axis = 0; axis < dimensions; axis += 1) {
+      const delta = end[axis] - start[axis];
+      lengthSquared += delta * delta;
+      projection += (point[axis] - start[axis]) * delta;
+    }
+    const fraction = lengthSquared
+      ? Math.max(0, Math.min(1, projection / lengthSquared))
+      : 0;
+    let distanceSquared = 0;
+    for (let axis = 0; axis < dimensions; axis += 1) {
+      const nearest = start[axis] + fraction * (end[axis] - start[axis]);
+      distanceSquared += (point[axis] - nearest) ** 2;
+    }
+    return distanceSquared;
+  }
+
+  function assignSegmentTraffic(
+    groups,
+    sessions,
+    {
+      dimensions,
+      tolerance,
+      pointsOf,
+      projectPoint,
+      minimumStep = 0.45,
+      subdivisions = 3,
+    },
+  ) {
+    if (!groups.length) return groups;
+    const dimensionCount = Math.max(2, Math.min(3, Number(dimensions) || 2));
+    const cellSize = Math.max(1, (Number(tolerance) || 0) * 0.5);
+    const radiusSquared = cellSize * cellSize;
+    const segmentSubdivisions = Math.max(1, Math.floor(Number(subdivisions) || 1));
+    const sessionPaths = sessions.map((session) =>
+      simplifyPath(pointsOf(session), projectPoint, dimensionCount, minimumStep),
+    );
+    const cells = new Map();
+
+    for (let sessionIndex = 0; sessionIndex < sessionPaths.length; sessionIndex += 1) {
+      for (const point of sessionPaths[sessionIndex]) {
+        if (!point.slice(0, dimensionCount).every(Number.isFinite)) continue;
+        const key = point
+          .slice(0, dimensionCount)
+          .map((value) => Math.floor(value / cellSize))
+          .join(',');
+        const entries = cells.get(key) || [];
+        entries.push([sessionIndex, point]);
+        cells.set(key, entries);
+      }
+    }
+
+    for (const group of groups) {
+      const trafficProfile = [group.profile[0].slice()];
+      const trafficSegmentParents = [];
+      for (let index = 1; index < group.profile.length; index += 1) {
+        const start = group.profile[index - 1];
+        const end = group.profile[index];
+        for (let part = 1; part <= segmentSubdivisions; part += 1) {
+          const fraction = part / segmentSubdivisions;
+          trafficProfile.push(
+            start.map((value, axis) => value + fraction * (end[axis] - value)),
+          );
+          trafficSegmentParents.push(index - 1);
+        }
+      }
+
+      group.trafficProfile = trafficProfile;
+      group.trafficSegmentParents = trafficSegmentParents;
+      group.segmentTraffic = [];
+      for (let index = 1; index < trafficProfile.length; index += 1) {
+        const start = trafficProfile[index - 1];
+        const end = trafficProfile[index];
+        const minimumCell = [];
+        const maximumCell = [];
+        for (let axis = 0; axis < dimensionCount; axis += 1) {
+          minimumCell.push(Math.floor((Math.min(start[axis], end[axis]) - cellSize) / cellSize));
+          maximumCell.push(Math.floor((Math.max(start[axis], end[axis]) + cellSize) / cellSize));
+        }
+
+        const candidates = new Map();
+        const addCell = (coordinates) => {
+          const entries = cells.get(coordinates.join(','));
+          if (!entries) return;
+          for (const [sessionIndex, point] of entries) {
+            const points = candidates.get(sessionIndex) || [];
+            points.push(point);
+            candidates.set(sessionIndex, points);
+          }
+        };
+        for (let x = minimumCell[0]; x <= maximumCell[0]; x += 1) {
+          for (let y = minimumCell[1]; y <= maximumCell[1]; y += 1) {
+            if (dimensionCount === 2) {
+              addCell([x, y]);
+              continue;
+            }
+            for (let z = minimumCell[2]; z <= maximumCell[2]; z += 1) {
+              addCell([x, y, z]);
+            }
+          }
+        }
+
+        let count = 0;
+        for (const points of candidates.values()) {
+          if (points.some((point) =>
+            pointSegmentDistanceSquared(point, start, end, dimensionCount) <= radiusSquared,
+          )) {
+            count += 1;
+          }
+        }
+        group.segmentTraffic.push({
+          count,
+          total: sessions.length,
+          share: sessions.length ? count / sessions.length : 0,
+        });
+      }
+    }
+    return groups;
+  }
+
   function findLargestSharedPair(xyGroups, xyzGroups) {
     let largest = { xyGroup: null, xyzGroup: null, sessionIds: [], count: 0 };
     const xyzBySession = new Map();
@@ -392,9 +514,10 @@
       zoom = fitZoom / (1 + 3 * easedProgress);
     }
 
+    const minimumZoom = hasAirport && mode === 'departure' ? 0.35 : 0.8;
     return {
       center,
-      zoom: Math.max(0.8, Math.min(safeMaxZoom, zoom)),
+      zoom: Math.max(minimumZoom, Math.min(safeMaxZoom, zoom)),
       mode: hasAirport ? mode : 'cohort',
     };
   }
@@ -402,6 +525,7 @@
   const api = {
     TIME_BIN_SECONDS,
     advanceTimeline,
+    assignSegmentTraffic,
     buildTemplateGroups,
     calculateCameraFraming,
     displayedCounts,

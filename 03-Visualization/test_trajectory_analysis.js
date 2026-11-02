@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   advanceTimeline,
+  assignSegmentTraffic,
   buildTemplateGroups,
   calculateCameraFraming,
   displayedCounts,
@@ -94,6 +95,7 @@ test('departure framing starts at the origin and zooms out with progress', () =>
   assert.deepEqual(start.center, airportPosition);
   assert.deepEqual(end.center, [0, 0, 15]);
   assert.ok(end.zoom < start.zoom);
+  assert.ok(end.zoom < 0.8, 'departure framing should continue zooming out beyond the cohort minimum');
 });
 
 test('broad cohorts use bounded framing when airports are not singularly selected', () => {
@@ -235,6 +237,55 @@ test('group segment colors and clicked-path phase share are recomputed from memb
   });
   assert.equal(broaderGroups.length, 1);
   assert.equal(broaderGroups[0].dominantPhase.total, 3);
+});
+
+test('local section support counts distinct sessions across different full routes', () => {
+  const sessions = [
+    { id: 'arrival', points: [[0, 0, 0, 0], [5, 0, 0, 1], [10, 0, 0, 2]] },
+    { id: 'departure', points: [[0, 10, 0, 0], [5, 10, 0, 1], [10, 0, 0, 2]] },
+    { id: 'local-crossing', points: [[5.2, 0.2, 0, 0], [7, 0.2, 0, 1], [9.8, 0.2, 0, 2]] },
+  ];
+  const groups = [
+    { members: [sessions[0]], profile: [[0, 0, 0], [5, 0, 0], [10, 0, 0]] },
+    { members: [sessions[1]], profile: [[0, 10, 0], [5, 10, 0], [10, 0, 0]] },
+  ];
+
+  assignSegmentTraffic(groups, sessions, {
+    dimensions: 2,
+    tolerance: 2,
+    pointsOf: (session) => session.points,
+    projectPoint: (point) => point.slice(0, 3),
+    subdivisions: 3,
+  });
+
+  assert.equal(groups[0].trafficProfile.length, 7);
+  assert.deepEqual(groups[0].trafficSegmentParents, [0, 0, 0, 1, 1, 1]);
+  assert.equal(groups[0].segmentTraffic[0].count, 1);
+  assert.equal(groups[0].segmentTraffic[0].total, 3);
+  assert.equal(groups[0].segmentTraffic[0].share, 1 / 3);
+  assert.equal(groups[0].segmentTraffic[5].count, 3);
+  assert.equal(groups[0].segmentTraffic[5].share, 1);
+});
+
+test('XYZ local section support respects altitude while XY support does not', () => {
+  const sessions = [0, 5].map((altitude, index) => ({
+    id: `altitude-${index}`,
+    points: [[0, 0, altitude, 0], [5, 0, altitude, 1], [10, 0, altitude, 2]],
+  }));
+  const makeGroup = () => [{ profile: [[0, 0, 0], [10, 0, 0]] }];
+  const options = {
+    tolerance: 4,
+    pointsOf: (session) => session.points,
+    projectPoint: (point) => point.slice(0, 3),
+  };
+  const xyGroups = makeGroup();
+  const xyzGroups = makeGroup();
+
+  assignSegmentTraffic(xyGroups, sessions, { ...options, dimensions: 2 });
+  assignSegmentTraffic(xyzGroups, sessions, { ...options, dimensions: 3 });
+
+  assert.equal(xyGroups[0].segmentTraffic[0].count, 2);
+  assert.equal(xyzGroups[0].segmentTraffic[0].count, 1);
 });
 
 test('template segment votes use midpoint phase profiles when supplied', () => {
