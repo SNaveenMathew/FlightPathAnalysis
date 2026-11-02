@@ -4,11 +4,13 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   advanceTimeline,
+  buildTemplateGroups,
   calculateCameraFraming,
   displayedCounts,
   findLargestSharedPair,
   formatPlaybackSpeed,
   normalizeTimeline,
+  phaseProfileForSession,
 } = require('./trajectory_analysis.js');
 
 test('shared membership is calculated from session IDs, not group IDs', () => {
@@ -127,4 +129,133 @@ test('displayed counts use export totals and current-filter session counts', () 
     filteredPoints: 35,
     filteredQcPoints: 2,
   });
+});
+
+test('continuous phase profiles follow route position and session-majority phase', () => {
+  const session = {
+    points: [[0, 0, 0, 0], [1, 0, 0, 1], [2, 0, 0, 2], [3, 0, 0, 3]],
+    phase_samples: [
+      { phase: 'climb' },
+      { phase: 'climb' },
+      { phase: 'cruise' },
+      { phase: 'descent' },
+    ],
+  };
+
+  const phaseData = phaseProfileForSession(session, {
+    pointsKey: 'points',
+    projectPoint: (point) => point.slice(0, 3),
+    dimensions: 3,
+    sampleCount: 4,
+  });
+
+  assert.deepEqual(phaseData.profile, ['climb', 'climb', 'cruise', 'descent']);
+  assert.equal(phaseData.dominantPhase, 'climb');
+});
+
+test('discrete phase samples vote within their exported time bins', () => {
+  const session = {
+    occ: [[0, 0, 0, 0], [1, 0, 0, 1]],
+    phase_samples: [
+      { time_s: 0.1, phase: 'climb' },
+      { time_s: 4.7, phase: 'climb' },
+      { time_s: 5.2, phase: 'descent' },
+      { time_s: 9.8, phase: 'descent' },
+    ],
+  };
+
+  const phaseData = phaseProfileForSession(session, {
+    pointsKey: 'occ',
+    timeBinSeconds: 5,
+    projectPoint: (point) => point.slice(0, 3),
+    dimensions: 3,
+    sampleCount: 2,
+  });
+
+  assert.deepEqual(phaseData.profile, ['climb', 'descent']);
+  assert.equal(phaseData.dominantPhase, 'climb');
+});
+
+test('group segment colors and clicked-path phase share are recomputed from members', () => {
+  const makeSession = (id, y, phases) => ({
+    id,
+    complete_kind: 'arrival',
+    points: [[0, y, 0, 0], [1, y, 0, 1], [2, y, 0, 2], [3, y, 0, 3]],
+    phase_samples: phases.map((phase) => ({ phase })),
+  });
+  const sessions = [
+    makeSession('a', 0, ['climb', 'climb', 'cruise', 'descent']),
+    makeSession('b', 0.01, ['climb', 'descent', 'descent', 'descent']),
+    makeSession('c', 20, ['approach', 'approach', 'approach', 'landing']),
+  ];
+
+  const groups = buildTemplateGroups(sessions, {
+    dimensions: 2,
+    tolerance: 1,
+    pointsOf: (session) => session.points,
+    projectPoint: (point) => point.slice(0, 3),
+    sampleCount: 4,
+    phaseProfileOf: (session, dimensions, sampleCount) =>
+      phaseProfileForSession(session, {
+        pointsKey: 'points',
+        projectPoint: (point) => point.slice(0, 3),
+        dimensions,
+        sampleCount,
+      }),
+  });
+
+  assert.equal(groups.length, 2);
+  assert.deepEqual(groups[0].dominantPhase, {
+    phase: 'climb',
+    count: 1,
+    total: 2,
+    share: 0.5,
+  });
+  assert.equal(groups[0].phaseSegments.length, 3);
+  assert.deepEqual(groups[0].phaseSegments[0], {
+    phase: 'climb',
+    count: 2,
+    total: 2,
+    share: 1,
+  });
+
+  const broaderGroups = buildTemplateGroups(sessions, {
+    dimensions: 2,
+    tolerance: 25,
+    pointsOf: (session) => session.points,
+    projectPoint: (point) => point.slice(0, 3),
+    sampleCount: 4,
+    phaseProfileOf: (session, dimensions, sampleCount) =>
+      phaseProfileForSession(session, {
+        pointsKey: 'points',
+        projectPoint: (point) => point.slice(0, 3),
+        dimensions,
+        sampleCount,
+      }),
+  });
+  assert.equal(broaderGroups.length, 1);
+  assert.equal(broaderGroups[0].dominantPhase.total, 3);
+});
+
+test('template segment votes use midpoint phase profiles when supplied', () => {
+  const sessions = ['a', 'b'].map((id) => ({
+    id,
+    complete_kind: 'departure',
+    points: [[0, 0, 0, 0], [1, 0, 0, 1]],
+  }));
+  const groups = buildTemplateGroups(sessions, {
+    dimensions: 2,
+    tolerance: 1,
+    pointsOf: (session) => session.points,
+    projectPoint: (point) => point.slice(0, 3),
+    sampleCount: 2,
+    phaseProfileOf: () => ({
+      profile: ['climb', 'descent'],
+      segmentProfile: ['descent'],
+      dominantPhase: 'descent',
+    }),
+  });
+
+  assert.equal(groups[0].phaseSegments[0].phase, 'descent');
+  assert.equal(groups[0].phaseSegments[0].share, 1);
 });

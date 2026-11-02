@@ -72,9 +72,111 @@
     return samples;
   }
 
+  function normalizedPhase(value) {
+    const phase = String(value ?? '').trim().toLowerCase();
+    return phase || 'unknown';
+  }
+
+  function dominantValue(values) {
+    const counts = new Map();
+    for (const value of values) {
+      const phase = normalizedPhase(value);
+      counts.set(phase, (counts.get(phase) || 0) + 1);
+    }
+    const ranked = [...counts.entries()].sort(
+      (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
+    );
+    if (!ranked.length) return { phase: 'unknown', count: 0, total: 0, share: 0 };
+    return {
+      phase: ranked[0][0],
+      count: ranked[0][1],
+      total: values.length,
+      share: ranked[0][1] / values.length,
+    };
+  }
+
+  function phaseProfileForSession(
+    session,
+    {
+      pointsKey = 'points',
+      timeBinSeconds = TIME_BIN_SECONDS,
+      projectPoint = (point) => point,
+      dimensions = 3,
+      sampleCount = 12,
+    } = {},
+  ) {
+    const points = session[pointsKey] || [];
+    const samples = Array.isArray(session.phase_samples) ? session.phase_samples : [];
+    const validBinSeconds = Number(timeBinSeconds) > 0 ? Number(timeBinSeconds) : TIME_BIN_SECONDS;
+    let pointPhases;
+
+    if (pointsKey === 'points' && samples.length === points.length) {
+      pointPhases = samples.map((sample) => normalizedPhase(sample.phase));
+    } else {
+      const phasesByBin = new Map();
+      for (const sample of samples) {
+        const seconds = Number(sample.time_s);
+        if (!Number.isFinite(seconds)) continue;
+        const bin = Math.floor(seconds / validBinSeconds + 1e-9);
+        const phases = phasesByBin.get(bin) || [];
+        phases.push(normalizedPhase(sample.phase));
+        phasesByBin.set(bin, phases);
+      }
+      pointPhases = points.map((point) => {
+        const bin = Math.floor(Number(point[3]) + 1e-9);
+        return dominantValue(phasesByBin.get(bin) || []).phase;
+      });
+    }
+
+    if (!points.length || sampleCount <= 0) {
+      return {
+        profile: Array.from({ length: Math.max(0, sampleCount) }, () => 'unknown'),
+        dominantPhase: dominantValue(samples.map((sample) => sample.phase)).phase,
+      };
+    }
+
+    const projected = points.map(projectPoint);
+    const cumulative = [0];
+    for (let index = 1; index < projected.length; index += 1) {
+      let distanceSquared = 0;
+      for (let axis = 0; axis < dimensions; axis += 1) {
+        distanceSquared += (projected[index][axis] - projected[index - 1][axis]) ** 2;
+      }
+      cumulative.push(cumulative[index - 1] + Math.sqrt(distanceSquared));
+    }
+
+    const totalDistance = cumulative[cumulative.length - 1];
+    const profile = [];
+    for (let sample = 0; sample < sampleCount; sample += 1) {
+      const fraction = sampleCount === 1 ? 0 : sample / (sampleCount - 1);
+      const target = totalDistance * fraction;
+      let right = 1;
+      while (right < cumulative.length - 1 && cumulative[right] < target) right += 1;
+      const left = Math.max(0, right - 1);
+      const nearest = target - cumulative[left] <= cumulative[right] - target ? left : right;
+      const index = totalDistance === 0
+        ? Math.round(fraction * (points.length - 1))
+        : nearest;
+      profile.push(pointPhases[index] || 'unknown');
+    }
+
+    const sessionPhases = samples.length
+      ? samples.map((sample) => normalizedPhase(sample.phase))
+      : pointPhases;
+    return { profile, dominantPhase: dominantValue(sessionPhases).phase };
+  }
+
   function buildTemplateGroups(
     sessions,
-    { dimensions, tolerance, pointsOf, projectPoint, kindOf = (session) => session.complete_kind, sampleCount = 12 },
+    {
+      dimensions,
+      tolerance,
+      pointsOf,
+      projectPoint,
+      kindOf = (session) => session.complete_kind,
+      sampleCount = 12,
+      phaseProfileOf = null,
+    },
   ) {
     const groups = [];
     for (const session of sessions) {
@@ -83,6 +185,12 @@
       const path = simplifyPath(points, projectPoint, 3);
       if (path.length < 2) continue;
       const profile = resamplePath(path, dimensions, sampleCount);
+      const phaseData = phaseProfileOf
+        ? phaseProfileOf(session, dimensions, sampleCount)
+        : null;
+      const phaseProfile = phaseData?.profile || [];
+      const phaseSegmentProfile = phaseData?.segmentProfile || null;
+      const sessionDominantPhase = normalizedPhase(phaseData?.dominantPhase);
       let best = null;
       let bestScore = Infinity;
 
@@ -116,6 +224,11 @@
 
       if (best && bestScore <= tolerance) {
         best.members.push(session);
+        if (phaseProfileOf) {
+          best.phaseProfiles.push(phaseProfile);
+          best.phaseSegmentProfiles.push(phaseSegmentProfile);
+          best.memberDominantPhases.push(sessionDominantPhase);
+        }
         const memberCount = best.members.length;
         for (let index = 0; index < best.profile.length; index += 1) {
           for (let axis = 0; axis < best.profile[index].length; axis += 1) {
@@ -124,12 +237,35 @@
           }
         }
       } else {
-        groups.push({
+        const group = {
           kind: kindOf(session),
           dimensions,
           members: [session],
           profile: profile.map((point) => point.slice()),
-        });
+        };
+        if (phaseProfileOf) {
+          group.phaseProfiles = [phaseProfile];
+          group.phaseSegmentProfiles = [phaseSegmentProfile];
+          group.memberDominantPhases = [sessionDominantPhase];
+        }
+        groups.push(group);
+      }
+    }
+
+    if (phaseProfileOf) {
+      for (const group of groups) {
+        const segmentCount = Math.max(0, group.phaseProfiles[0]?.length - 1 || 0);
+        const hasMidpointProfiles = group.phaseSegmentProfiles.every(Array.isArray);
+        group.phaseSegments = Array.from({ length: segmentCount }, (_, index) =>
+          dominantValue(
+            hasMidpointProfiles
+              ? group.phaseSegmentProfiles.map((profile) => normalizedPhase(profile[index]))
+              : group.phaseProfiles.map((profile) =>
+                  dominantValue([profile[index], profile[index + 1]]).phase,
+                ),
+          ),
+        );
+        group.dominantPhase = dominantValue(group.memberDominantPhases);
       }
     }
     return groups;
@@ -269,9 +405,11 @@
     buildTemplateGroups,
     calculateCameraFraming,
     displayedCounts,
+    dominantValue,
     findLargestSharedPair,
     formatPlaybackSpeed,
     normalizeTimeline,
+    phaseProfileForSession,
     resamplePath,
     sessionPointCount,
     simplifyPath,

@@ -4,6 +4,7 @@
   const Analysis = window.TrajectoryAnalysis;
   const mode = document.body.dataset.mode;
   const continuous = mode === 'continuous';
+  const phaseOverlay = document.body.dataset.phaseOverlay === 'true';
   const pointsKey = continuous ? 'points' : 'occ';
   const map = document.getElementById('map');
   const mapContext = map.getContext('2d');
@@ -18,6 +19,7 @@
   const groupingSummary = document.getElementById('grouping-summary');
   const edgeNote = document.getElementById('edge-note');
   const qualityNote = document.getElementById('quality-note');
+  const phaseSelection = document.getElementById('phase-selection');
   const sourceFilter = document.getElementById('source-airport');
   const destinationFilter = document.getElementById('destination-airport');
   const toleranceSelector = document.querySelector('#route-tolerance, #tolerance');
@@ -29,6 +31,20 @@
     departure: '#f5a65b',
     local: '#c792ea',
     transit: '#70a1ff',
+  };
+  const phaseColors = {
+    ground: '#9aa9bd',
+    initial_climb: '#ff9f43',
+    climb: '#ff5b5b',
+    cruise: '#bb86fc',
+    level_flight: '#45d6c5',
+    descent: '#5fa8ff',
+    approach: '#35d49a',
+    landing: '#ffe066',
+    landing_roll: '#f4a261',
+    go_around_climb_candidate: '#ff5ec4',
+    airborne_transition: '#d8e5f2',
+    unknown: '#687588',
   };
   const gold = '#f4c542';
   let timeBinSeconds = Analysis.TIME_BIN_SECONDS;
@@ -54,9 +70,56 @@
   let xyGroups = [];
   let xyzGroups = [];
   let sharedPair = { xyGroup: null, xyzGroup: null, sessionIds: [], count: 0 };
+  let selectedXYGroup = null;
+  let selectedXYZGroup = null;
+  let routePickTargets = [];
 
   function categoryColor(kind) {
     return categoryColors[kind] || '#70a1ff';
+  }
+
+  function phaseColor(phase) {
+    return phaseColors[phase] || phaseColors.unknown;
+  }
+
+  function phaseProfileOf(session, dimensions, sampleCount) {
+    const fineCount = Math.max(1, (sampleCount - 1) * 2 + 1);
+    const fineProfile = Analysis.phaseProfileForSession(session, {
+      pointsKey,
+      timeBinSeconds,
+      projectPoint: pointWorld,
+      dimensions,
+      sampleCount: fineCount,
+    });
+    return {
+      profile: fineProfile.profile.filter((_, index) => index % 2 === 0),
+      segmentProfile: fineProfile.profile.filter((_, index) => index % 2 === 1),
+      dominantPhase: fineProfile.dominantPhase,
+    };
+  }
+
+  function describeSelectedGroup(label, group) {
+    if (!group) return `${label}: no path selected`;
+    const dominant = group.dominantPhase;
+    if (!dominant || dominant.total === 0) {
+      return `${label}: ${group.members.length} sessions · phase unavailable`;
+    }
+    const percent = (dominant.share * 100).toFixed(1);
+    const title = dominant.phase.replaceAll('_', ' ');
+    return `${label}: ${title} is dominant in ${percent}% (${dominant.count}/${dominant.total}) of member sessions`;
+  }
+
+  function updatePhaseSelection() {
+    if (!phaseOverlay || !phaseSelection) return;
+    if (!selectedXYGroup && !selectedXYZGroup) {
+      phaseSelection.textContent =
+        'Click an XY or XYZ template to overlay its segment-by-segment dominant phases and inspect its path-wide dominant-phase share. Click empty XY space to clear the selection.';
+      return;
+    }
+    phaseSelection.textContent = [
+      describeSelectedGroup('2D / XY', selectedXYGroup),
+      describeSelectedGroup('3D / XYZ', selectedXYZGroup),
+    ].join(' · ');
   }
 
   function markerColor(altitudeFeet) {
@@ -237,7 +300,7 @@
         28,
       );
       if (profile.length < 2) continue;
-      baseContext.strokeStyle = categoryColor(session.complete_kind);
+      baseContext.strokeStyle = phaseOverlay ? '#6b7c93' : categoryColor(session.complete_kind);
       baseContext.globalAlpha = 0.12;
       baseContext.lineWidth = 0.65 * pixelRatio;
       baseContext.lineCap = 'round';
@@ -250,21 +313,56 @@
   function drawMapTemplates() {
     const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
     const zoomWeight = Math.max(0.82, Math.min(1.65, Math.sqrt(mapView.zoom)));
+    const visibleCount = Math.max(1, visibleSessions().length);
     for (const group of xyGroups) {
+      if (!phaseOverlay) {
+        const highlighted = group === sharedPair.xyGroup;
+        mapContext.strokeStyle = highlighted ? gold : categoryColor(group.kind);
+        mapContext.globalAlpha = highlighted
+          ? 1
+          : Math.min(0.96, 0.48 + 0.09 * Math.log2(group.members.length + 1));
+        mapContext.lineWidth =
+          (highlighted
+            ? 3.5
+            : Math.min(6, 1.25 + Math.log10(group.members.length) * 1.35)) *
+          zoomWeight *
+          pixelRatio;
+        mapContext.lineCap = 'round';
+        mapContext.lineJoin = 'round';
+        drawPath(mapContext, group.profile, 2, mapPosition);
+        continue;
+      }
+
+      const selected = group === selectedXYGroup;
       const highlighted = group === sharedPair.xyGroup;
-      mapContext.strokeStyle = highlighted ? gold : categoryColor(group.kind);
-      mapContext.globalAlpha = highlighted
-        ? 1
-        : Math.min(0.96, 0.48 + 0.09 * Math.log2(group.members.length + 1));
-      mapContext.lineWidth =
-        (highlighted
-          ? 3.5
-          : Math.min(6, 1.25 + Math.log10(group.members.length) * 1.35)) *
-        zoomWeight *
-        pixelRatio;
+      const share = Math.min(1, group.members.length / visibleCount);
+      const width = (1.1 + 5.2 * Math.sqrt(share)) * zoomWeight * pixelRatio;
+      const alpha = 0.24 + 0.76 * Math.sqrt(share);
       mapContext.lineCap = 'round';
       mapContext.lineJoin = 'round';
+      if (!selected) {
+        mapContext.strokeStyle = highlighted ? gold : categoryColor(group.kind);
+        mapContext.globalAlpha = highlighted ? 1 : alpha;
+        mapContext.lineWidth = width;
+        drawPath(mapContext, group.profile, 2, mapPosition);
+        continue;
+      }
+
+      mapContext.strokeStyle = gold;
+      mapContext.globalAlpha = 0.95;
+      mapContext.lineWidth = width + 4 * pixelRatio;
       drawPath(mapContext, group.profile, 2, mapPosition);
+      for (let index = 1; index < group.profile.length; index += 1) {
+        const start = mapPosition(group.profile[index - 1]);
+        const end = mapPosition(group.profile[index]);
+        mapContext.beginPath();
+        mapContext.moveTo(start.x, start.y);
+        mapContext.lineTo(end.x, end.y);
+        mapContext.strokeStyle = phaseColor(group.phaseSegments?.[index - 1]?.phase);
+        mapContext.globalAlpha = alpha;
+        mapContext.lineWidth = width;
+        mapContext.stroke();
+      }
     }
     mapContext.globalAlpha = 1;
   }
@@ -280,8 +378,11 @@
       mapContext.arc(position.x, position.y, radius, 0, Math.PI * 2);
       mapContext.fillStyle = `rgb(${markerColor(mean.position[2] / 0.0003048).join(',')})`;
       mapContext.fill();
-      mapContext.strokeStyle = group === sharedPair.xyGroup ? gold : '#09111f';
-      mapContext.lineWidth = group === sharedPair.xyGroup ? 2 * pixelRatio : pixelRatio;
+      const highlighted = phaseOverlay
+        ? group === (selectedXYGroup || sharedPair.xyGroup)
+        : group === sharedPair.xyGroup;
+      mapContext.strokeStyle = highlighted ? gold : '#09111f';
+      mapContext.lineWidth = highlighted ? 2 * pixelRatio : pixelRatio;
       mapContext.stroke();
     }
 
@@ -311,8 +412,11 @@
   }
 
   function dispose(object) {
-    if (!object || !scene) return;
-    scene.remove(object);
+    if (!object) return;
+    object.parent?.remove(object);
+    if (object.children?.length) {
+      for (const child of [...object.children]) dispose(child);
+    }
     object.geometry?.dispose();
     if (Array.isArray(object.material)) object.material.forEach((material) => material.dispose());
     else object.material?.dispose();
@@ -339,6 +443,82 @@
     return [color.r * strength, color.g * strength, color.b * strength];
   }
 
+  function vectorCross(a, b) {
+    return [
+      a[1] * b[2] - a[2] * b[1],
+      a[2] * b[0] - a[0] * b[2],
+      a[0] * b[1] - a[1] * b[0],
+    ];
+  }
+
+  function vectorUnit(vector) {
+    const length = Math.hypot(...vector);
+    return length > 0 ? vector.map((value) => value / length) : [0, 0, 0];
+  }
+
+  function appendTubeSegment(positions, colors, start, end, radius, tint) {
+    const direction = vectorUnit(end.map((value, axis) => value - start[axis]));
+    if (direction.every((value) => value === 0)) return;
+    const reference = Math.abs(direction[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+    const u = vectorUnit(vectorCross(direction, reference));
+    const v = vectorUnit(vectorCross(direction, u));
+    const sides = 7;
+    const color = new THREE.Color(tint);
+    const rgb = [color.r, color.g, color.b];
+    const ringStart = [];
+    const ringEnd = [];
+    for (let side = 0; side < sides; side += 1) {
+      const angle = (Math.PI * 2 * side) / sides;
+      const offset = u.map((value, axis) =>
+        radius * (Math.cos(angle) * value + Math.sin(angle) * v[axis]),
+      );
+      ringStart.push(start.map((value, axis) => value + offset[axis]));
+      ringEnd.push(end.map((value, axis) => value + offset[axis]));
+    }
+    for (let side = 0; side < sides; side += 1) {
+      const next = (side + 1) % sides;
+      const vertices = [
+        ringStart[side], ringEnd[side], ringEnd[next],
+        ringStart[side], ringEnd[next], ringStart[next],
+      ];
+      for (const vertex of vertices) {
+        positions.push(...vertex);
+        colors.push(...rgb);
+      }
+    }
+  }
+
+  function phaseTubeMesh(group, transform, radius, strength, colorOverride = null) {
+    const positions = [];
+    const colors = [];
+    for (let index = 1; index < group.profile.length; index += 1) {
+      const phase = group.phaseSegments?.[index - 1]?.phase || 'unknown';
+      const color = colorOverride || phaseColor(phase);
+      const source = new THREE.Color(color);
+      const tint = `#${source.multiplyScalar(strength).getHexString()}`;
+      appendTubeSegment(
+        positions,
+        colors,
+        worldToThree(group.profile[index - 1], transform),
+        worldToThree(group.profile[index], transform),
+        radius,
+        tint,
+      );
+    }
+    const mesh = new THREE.Mesh(
+      makeGeometry(positions, colors),
+      new THREE.MeshBasicMaterial({
+        vertexColors: true,
+        transparent: true,
+        opacity: colorOverride ? 0.9 : 0.55 + 0.42 * Math.sqrt(strength),
+        depthWrite: !colorOverride,
+        side: THREE.DoubleSide,
+      }),
+    );
+    mesh.userData.templateGroup = group;
+    return mesh;
+  }
+
   function build3dRoutes() {
     dispose(trackObject);
     dispose(routeObject);
@@ -346,6 +526,7 @@
     trackObject = null;
     routeObject = null;
     sharedObject = null;
+    routePickTargets = [];
     if (!scene || !worldBounds) return;
 
     const transform = worldTransform();
@@ -355,19 +536,52 @@
     const routeColors = [];
     const sharedPositions = [];
     const sharedColors = [];
+    const visible = visibleSessions();
     const largestGroup = Math.max(1, ...xyzGroups.map((group) => group.members.length));
 
-    for (const session of visibleSessions()) {
+    for (const session of visible) {
       const profile = Analysis.resamplePath(
         Analysis.simplifyPath(sessionPoints(session), pointWorld, 2, 0.45),
         2,
         28,
       );
-      const tint = categoryRgb(session.complete_kind, 0.55);
+      const tint = phaseOverlay ? [0.15, 0.19, 0.25] : categoryRgb(session.complete_kind, 0.55);
       for (let index = 1; index < profile.length; index += 1) {
         trackPositions.push(...worldToThree(profile[index - 1], transform), ...worldToThree(profile[index], transform));
         trackColors.push(...tint, ...tint);
       }
+    }
+
+    trackObject = new THREE.LineSegments(
+      makeGeometry(trackPositions, trackColors),
+      new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.22 }),
+    );
+
+    if (phaseOverlay) {
+      routeObject = new THREE.Group();
+      const denominator = Math.max(1, visible.length);
+      for (const group of xyzGroups) {
+        const share = Math.min(1, group.members.length / denominator);
+        const selected = group === selectedXYZGroup;
+        const strength = 0.45 + 0.55 * Math.sqrt(share);
+        const radius = 0.05 + 0.65 * Math.sqrt(share);
+        if (selected) {
+          routeObject.add(phaseTubeMesh(group, transform, radius + 0.12, 1, gold));
+        }
+        const categoryHighlight = !selected && group === sharedPair.xyzGroup;
+        const mesh = phaseTubeMesh(
+          group,
+          transform,
+          radius,
+          strength,
+          selected ? null : categoryHighlight ? gold : categoryColor(group.kind),
+        );
+        routePickTargets.push(mesh);
+        routeObject.add(mesh);
+      }
+      scene.add(trackObject, routeObject);
+      update3dMarkers(transform);
+      return;
     }
 
     for (const group of xyzGroups) {
@@ -385,10 +599,6 @@
       }
     }
 
-    trackObject = new THREE.LineSegments(
-      makeGeometry(trackPositions, trackColors),
-      new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.22 }),
-    );
     routeObject = new THREE.LineSegments(
       makeGeometry(routePositions, routeColors),
       new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.95 }),
@@ -399,6 +609,58 @@
     );
     scene.add(trackObject, routeObject, sharedObject);
     update3dMarkers(transform);
+  }
+
+  function distanceToSegment(point, start, end) {
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const lengthSquared = dx * dx + dy * dy;
+    const fraction = lengthSquared
+      ? Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared))
+      : 0;
+    return Math.hypot(point.x - (start.x + fraction * dx), point.y - (start.y + fraction * dy));
+  }
+
+  function selectXYPath(event) {
+    const rect = map.getBoundingClientRect();
+    const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+    const point = {
+      x: ((event.clientX - rect.left) / Math.max(1, rect.width)) * map.width,
+      y: ((event.clientY - rect.top) / Math.max(1, rect.height)) * map.height,
+    };
+    let selected = null;
+    let nearest = 13 * pixelRatio;
+    for (const group of xyGroups) {
+      for (let index = 1; index < group.profile.length; index += 1) {
+        const distance = distanceToSegment(
+          point,
+          mapPosition(group.profile[index - 1]),
+          mapPosition(group.profile[index]),
+        );
+        if (distance < nearest) {
+          nearest = distance;
+          selected = group;
+        }
+      }
+    }
+    selectedXYGroup = selected;
+    drawMap();
+    updatePhaseSelection();
+  }
+
+  function selectXYZPath(event, canvas) {
+    if (!routePickTargets.length || !camera) return;
+    const rect = canvas.getBoundingClientRect();
+    const pointer = new THREE.Vector2(
+      ((event.clientX - rect.left) / Math.max(1, rect.width)) * 2 - 1,
+      -(((event.clientY - rect.top) / Math.max(1, rect.height)) * 2 - 1),
+    );
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(pointer, camera);
+    const intersection = raycaster.intersectObjects(routePickTargets, false)[0];
+    selectedXYZGroup = intersection?.object.userData.templateGroup || null;
+    build3dRoutes();
+    updatePhaseSelection();
   }
 
   function meanActivePosition(group) {
@@ -613,12 +875,18 @@
       `Current filters: ${counts.filteredSessions.toLocaleString()} sessions · ` +
       `${counts.filteredPoints.toLocaleString()} points · ` +
       `${counts.filteredQcPoints.toLocaleString()} QC-flagged points.`;
-    const sharedText = sharedPair.count
-      ? `${sharedPair.count.toLocaleString()} sessions shared by the most-overlapping XY/XYZ template pair`
-      : 'No shared XY/XYZ template membership in the current filters';
-    groupingSummary.textContent =
-      `Independent grouping: ${xyGroups.length} XY / ${xyzGroups.length} XYZ templates · ${sharedText}. ` +
-      `Equal template counts do not imply equal membership.`;
+    if (phaseOverlay) {
+      groupingSummary.textContent =
+        `Independent grouping: ${xyGroups.length} XY / ${xyzGroups.length} XYZ templates. ` +
+        `Phase votes and membership share are recalculated for the current filters and tolerance.`;
+    } else {
+      const sharedText = sharedPair.count
+        ? `${sharedPair.count.toLocaleString()} sessions shared by the most-overlapping XY/XYZ template pair`
+        : 'No shared XY/XYZ template membership in the current filters';
+      groupingSummary.textContent =
+        `Independent grouping: ${xyGroups.length} XY / ${xyzGroups.length} XYZ templates · ${sharedText}. ` +
+        `Equal template counts do not imply equal membership.`;
+    }
     status.textContent = `${xyGroups.length} XY · ${xyzGroups.length} XYZ templates`;
   }
 
@@ -632,23 +900,29 @@
   function regroup() {
     const visible = visibleSessions();
     const tolerance = projectTolerance();
+    selectedXYGroup = null;
+    selectedXYZGroup = null;
+    const phaseOptions = phaseOverlay ? { phaseProfileOf } : {};
     xyGroups = Analysis.buildTemplateGroups(visible, {
       dimensions: 2,
       tolerance,
       pointsOf: sessionPoints,
       projectPoint: pointWorld,
+      ...phaseOptions,
     });
     xyzGroups = Analysis.buildTemplateGroups(visible, {
       dimensions: 3,
       tolerance,
       pointsOf: sessionPoints,
       projectPoint: pointWorld,
+      ...phaseOptions,
     });
     sharedPair = Analysis.findLargestSharedPair(xyGroups, xyzGroups);
     drawMapBase();
     build3dRoutes();
     update(0.2, true);
     renderCounts();
+    updatePhaseSelection();
   }
 
 
@@ -761,7 +1035,8 @@
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(host.clientWidth, host.clientHeight);
     renderer.setClearColor('#09111f');
-    host.appendChild(renderer.domElement);
+    const canvas = renderer.domElement;
+    host.appendChild(canvas);
     scene = new THREE.Scene();
     camera = new THREE.PerspectiveCamera(
       48,
@@ -788,20 +1063,29 @@
       },
     };
 
-    const canvas = renderer.domElement;
+    let pointerStart = { x: 0, y: 0 };
+    let pointerMoved = false;
     canvas.addEventListener('pointerdown', (event) => {
-      setAutoFrame(false);
+      if (!phaseOverlay) setAutoFrame(false);
       orbit.dragging = true;
       orbit.x = event.clientX;
       orbit.y = event.clientY;
+      pointerStart = { x: event.clientX, y: event.clientY };
+      pointerMoved = false;
       canvas.setPointerCapture(event.pointerId);
     });
     canvas.addEventListener('pointerup', (event) => {
       orbit.dragging = false;
+      if (phaseOverlay && !pointerMoved) selectXYZPath(event, canvas);
       if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
     });
     canvas.addEventListener('pointermove', (event) => {
       if (!orbit.dragging) return;
+      if (phaseOverlay && !pointerMoved) {
+        pointerMoved = Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) >= 3;
+        if (pointerMoved) setAutoFrame(false);
+      }
+      if (phaseOverlay && !pointerMoved) return;
       orbit.theta -= (event.clientX - orbit.x) * 0.006;
       orbit.phi = Math.max(
         0.08,
@@ -826,6 +1110,7 @@
 
   document.getElementById('play').addEventListener('click', togglePlayback);
   autoFrameButton.addEventListener('click', () => setAutoFrame(!state.autoFrame));
+  if (phaseOverlay) map.addEventListener('click', selectXYPath);
   document.querySelectorAll('.speed').forEach((button) => {
     button.addEventListener('click', () => {
       state.speed = Number(button.dataset.speed);
