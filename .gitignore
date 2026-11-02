@@ -10,6 +10,9 @@ data/*
 __pycache__/
 *.py[cod]
 
+# Node.js dependencies
+node_modules/
+
 # Local datasets and temporary scripts
 *.feather
 /tmp_*.py
