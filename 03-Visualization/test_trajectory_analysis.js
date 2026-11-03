@@ -7,6 +7,7 @@ const {
   assignSegmentTraffic,
   buildTemplateGroups,
   calculateCameraFraming,
+  clusterSpacetimeMarkers,
   displayedCounts,
   findLargestSharedPair,
   formatPlaybackSpeed,
@@ -74,6 +75,26 @@ test('XYZ marker merging respects altitude while XY can merge crossing positions
 
   assert.equal(mergeNearbyMarkers(markers, 2, 6)[0].count, 7);
   assert.equal(mergeNearbyMarkers(markers, 3, 6).length, 2);
+});
+
+test('3D traffic clusters sum aircraft within XYZ and adjacent time tolerances', () => {
+  const clusters = clusterSpacetimeMarkers(
+    [
+      { position: [0, 0, 0], time: 0, count: 3 },
+      { position: [2, 0, 0.25], time: 0.5, count: 4, highlighted: true },
+      { position: [0, 0, 2], time: 0, count: 2 },
+      { position: [0, 0, 0], time: 3, count: 1 },
+    ],
+    { x: 3, y: 3, z: 0.5, t: 1 },
+  );
+
+  assert.equal(clusters.length, 3);
+  assert.equal(clusters[0].count, 7);
+  assert.equal(clusters[0].groupCount, 2);
+  assert.deepEqual(clusters[0].position, [8 / 7, 0, 1 / 7]);
+  assert.equal(clusters[0].time, 2 / 7);
+  assert.equal(clusters[0].highlighted, true);
+  assert.deepEqual(clusters.slice(1).map((cluster) => cluster.count), [2, 1]);
 });
 
 test('timeline normalization starts each session at its first retained point', () => {

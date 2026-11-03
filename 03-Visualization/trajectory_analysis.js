@@ -489,6 +489,53 @@
     return clusters.map(({ members, ...cluster }) => cluster);
   }
 
+  function clusterSpacetimeMarkers(markers, tolerances) {
+    const axisKeys = ['x', 'y', 'z', 't'];
+    const limits = axisKeys.map((axis) => Number(tolerances?.[axis]));
+    if (limits.some((limit) => !Number.isFinite(limit) || limit <= 0)) return [];
+
+    // Fixed XYZT cells keep per-frame aggregation linear for large exports.
+    const cells = new Map();
+    for (const marker of markers) {
+      if (
+        !Array.isArray(marker.position) ||
+        marker.position.length < 3 ||
+        !marker.position.slice(0, 3).every(Number.isFinite)
+      ) continue;
+      const time = Number(marker.time);
+      const count = Number(marker.count);
+      if (!Number.isFinite(time) || !Number.isFinite(count) || count <= 0) continue;
+
+      const x = marker.position[0];
+      const y = marker.position[1];
+      const z = marker.position[2];
+      const key = `${Math.floor(x / limits[0])},${Math.floor(y / limits[1])},${Math.floor(z / limits[2])},${Math.floor(time / limits[3])}`;
+      const groupCount = Math.max(1, Number(marker.groupCount) || 1);
+      const cluster = cells.get(key);
+      if (!cluster) {
+        cells.set(key, {
+          position: [x, y, z],
+          time,
+          count,
+          groupCount,
+          highlighted: Boolean(marker.highlighted),
+        });
+        continue;
+      }
+
+      const combinedCount = cluster.count + count;
+      cluster.position[0] += ((x - cluster.position[0]) * count) / combinedCount;
+      cluster.position[1] += ((y - cluster.position[1]) * count) / combinedCount;
+      cluster.position[2] += ((z - cluster.position[2]) * count) / combinedCount;
+      cluster.time += ((time - cluster.time) * count) / combinedCount;
+      cluster.count = combinedCount;
+      cluster.groupCount += groupCount;
+      cluster.highlighted ||= Boolean(marker.highlighted);
+    }
+
+    return [...cells.values()];
+  }
+
   function sessionPointCount(session, pointsKey) {
     const explicit = Number(session.n_points ?? session.n_in_sector_points);
     return Number.isFinite(explicit) && explicit >= 0
@@ -596,6 +643,7 @@
     assignSegmentTraffic,
     buildTemplateGroups,
     calculateCameraFraming,
+    clusterSpacetimeMarkers,
     displayedCounts,
     dominantValue,
     findLargestSharedPair,
