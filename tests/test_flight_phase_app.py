@@ -1,0 +1,162 @@
+"""Tests for the Flight Phase Visualization and Manual Tagging App."""
+
+import pytest
+from fastapi.testclient import TestClient
+
+from flight_phase_app.data_manager import DataManager
+from flight_phase_app.evaluator import PhaseEvaluator
+from flight_phase_app.server import app
+from flight_phase_app.tag_store import TagStore
+
+
+@pytest.fixture
+def test_client():
+    return TestClient(app)
+
+
+def test_data_manager_loads_sessions():
+    dm = DataManager()
+    dm.load_data()
+    ac_list = dm.get_aircraft_list()
+    assert len(ac_list) > 0
+
+    first_ac = ac_list[0]["aircraft"]
+    details = dm.get_aircraft_details(first_ac)
+    assert details is not None
+    assert details["aircraft"] == first_ac
+    assert len(details["sessions"]) > 0
+
+    # Test batch fetch
+    first_sid = details["sessions"][0]["id"]
+    batch = dm.get_sessions_batch([first_sid])
+    assert len(batch["sessions"]) == 1
+    assert batch["sessions"][0]["id"] == first_sid
+    assert "points" in batch["sessions"][0]
+    assert "phase_samples" in batch["sessions"][0]
+    assert len(batch["sessions"][0]["points"]) == len(batch["sessions"][0]["phase_samples"])
+
+
+def test_tag_store_crud(tmp_path):
+    tags_file = tmp_path / "test_tags.json"
+    ts = TagStore(storage_path=tags_file)
+
+    # Initial state
+    assert len(ts.get_tags()) == 0
+
+    # Add tag
+    tag = ts.add_tag(
+        session_id="test_sess_01",
+        aircraft="test_ac_01",
+        t_start_s=100.0,
+        t_end_s=150.0,
+        manual_phase="approach",
+        confidence="high",
+        notes="Testing tag",
+    )
+    assert tag["tag_id"] is not None
+    assert tag["manual_phase"] == "approach"
+
+    # Query tags
+    tags = ts.get_tags(session_id="test_sess_01")
+    assert len(tags) == 1
+    assert tags[0]["session_id"] == "test_sess_01"
+
+    # Delete tag
+    deleted = ts.delete_tag(tag["tag_id"])
+    assert deleted is True
+    assert len(ts.get_tags()) == 0
+
+
+def test_evaluator_agreement():
+    dm = DataManager()
+    dm.load_data()
+    ac_list = dm.get_aircraft_list()
+    first_ac = ac_list[0]["aircraft"]
+    details = dm.get_aircraft_details(first_ac)
+    first_sess = details["sessions"][0]
+
+    ts = TagStore()
+    evaluator = PhaseEvaluator(data_manager=dm, tag_store=ts)
+    res = evaluator.evaluate(session_id=first_sess["id"])
+    assert "agreement_rate_pct" in res
+    assert "confusion_matrix" in res
+    assert "refinement_suggestions" in res
+
+
+def test_api_endpoints(test_client):
+    # Test status endpoint
+    resp = test_client.get("/api/status")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "ready"
+    assert data["total_aircraft"] > 0
+
+    # Test aircraft list
+    resp = test_client.get("/api/aircraft")
+    assert resp.status_code == 200
+    ac_list = resp.json()
+    assert len(ac_list) > 0
+
+    first_ac = ac_list[0]["aircraft"]
+
+    # Test aircraft details
+    resp = test_client.get(f"/api/aircraft/{first_ac}")
+    assert resp.status_code == 200
+    details = resp.json()
+    assert details["aircraft"] == first_ac
+    assert len(details["sessions"]) > 0
+
+    # Test batch sessions
+    first_sid = details["sessions"][0]["id"]
+    resp = test_client.post("/api/sessions/batch", json={"session_ids": [first_sid]})
+    assert resp.status_code == 200
+    batch = resp.json()
+    assert len(batch["sessions"]) == 1
+
+    # Test tag creation and deletion via API
+    tag_payload = {
+        "session_id": first_sid,
+        "aircraft": first_ac,
+        "t_start_s": 0.0,
+        "t_end_s": 30.0,
+        "manual_phase": "climb",
+        "confidence": "high",
+        "notes": "API test tag",
+    }
+    resp = test_client.post("/api/tags", json=tag_payload)
+    assert resp.status_code == 200
+    tag_data = resp.json()
+    tag_id = tag_data["tag"]["tag_id"]
+
+    # Verify tag is returned in GET
+    resp = test_client.get(f"/api/tags?session_id={first_sid}")
+    assert resp.status_code == 200
+    tags = resp.json()
+    assert any(t["tag_id"] == tag_id for t in tags)
+
+    # Clean up test tag
+    resp = test_client.delete(f"/api/tags/{tag_id}")
+    assert resp.status_code == 200
+
+
+def test_full_session_duration_a0be05_s1():
+    dm = DataManager()
+    dm.load_data()
+    details = dm.get_aircraft_details("a0be05")
+    assert details is not None
+    s1 = next(s for s in details["sessions"] if s["id"] == "a0be05_S1")
+
+    # Duration must be full flight duration in seconds (>2000s), NOT truncated bin count (415)
+    assert s1["duration_s"] > 2000.0
+    assert s1["t_max"] > 2000.0
+
+    batch = dm.get_sessions_batch(["a0be05_S1"])
+    sess = batch["sessions"][0]
+    assert sess["duration_s"] > 2000.0
+    assert batch["bounds"]["max_time_s"] > 2000.0
+
+    # Ensure last point reaches JFK altitude 0ft
+    last_pt = sess["points"][-1]
+    assert last_pt[2] == 0.0
+    assert sess["phase_samples"][-1]["phase"] == "ground"
+
