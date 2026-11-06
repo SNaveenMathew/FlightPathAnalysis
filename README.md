@@ -68,7 +68,21 @@ prerequisites or alternatives.
    flag is false at each track-segment start and true only when the current
    estimated label differs from its prior sample in that segment.
 
-5. **View the trajectories:** from `03-Visualization/`, start
+5. **Interactive Flight Phase Explorer & Manual Tagging Studio:**
+   Launch the dedicated interactive application with:
+   ```bash
+   conda run -n flight_path python run_app.py
+   # Or if flight_path is activated:
+   python run_app.py
+   ```
+   Open <http://127.0.0.1:8000> to:
+   - **Choose an Aircraft:** Search and pick any aircraft (e.g. `a387f0`, `a0be05`).
+   - **Select Sessions:** Defaults to all sessions of the aircraft automatically; toggle individual sessions on/off to compare or isolate specific flights.
+   - **Animate Predicted Phases:** Watch the aircraft traverse its trajectory on an interactive 2D radar display with synchronized altitude profile, ground speed, and vertical rate telemetry.
+   - **Manual Phase Tagging:** Select time ranges by clicking/dragging on the timeline or using `[` and `]`, assign manual phase labels (`ground`, `initial_climb`, `climb`, `cruise`, `level_flight`, `descent`, `approach`, `landing`, `landing_roll`, `go_around_climb_candidate`, `airborne_transition`), and save rationale notes.
+   - **Model Refinement & Evaluation:** Open the in-app *Refinement & Report* modal or run `python evaluate_manual_tags.py` to evaluate agreement rate, inspect confusion matrices, and view concrete recommendations for tuning heuristic thresholds in `02-Preprocessing/flight_phase.py`.
+
+6. **View static route templates (Alternative legacy viewers):** from `03-Visualization/`, start
    `python -m http.server 8765`, then open either:
    - <http://127.0.0.1:8765/02-session_space_viz.html> for discretized
      `(x, y, z, t)`.
