@@ -1,0 +1,310 @@
+"""Data manager for loading and indexing continuous flight sessions and airports."""
+
+from __future__ import annotations
+
+import json
+from collections import Counter
+from pathlib import Path
+from typing import Any
+
+WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_SESSIONS_PATH = WORKSPACE_ROOT / "03-Visualization" / "continuous_sessions.json"
+DEFAULT_AIRPORTS_PATH = WORKSPACE_ROOT / "data" / "GlobalAirportDatabase.txt"
+
+# Standard known airports in NY/NJ area and Northeast corridor
+KNOWN_AIRPORTS: dict[str, dict[str, Any]] = {
+    "JFK": {"name": "John F Kennedy Intl", "latitude": 40.6398, "longitude": -73.7789, "elevation_ft": 13.0},
+    "LGA": {"name": "LaGuardia", "latitude": 40.7769, "longitude": -73.8740, "elevation_ft": 21.0},
+    "EWR": {"name": "Newark Liberty Intl", "latitude": 40.6895, "longitude": -74.1745, "elevation_ft": 18.0},
+    "TEB": {"name": "Teterboro", "latitude": 40.8501, "longitude": -74.0608, "elevation_ft": 8.0},
+    "HPN": {"name": "Westchester County", "latitude": 41.0670, "longitude": -73.7076, "elevation_ft": 439.0},
+    "FRG": {"name": "Republic", "latitude": 40.7288, "longitude": -73.4134, "elevation_ft": 80.0},
+    "ISP": {"name": "Long Island MacArthur", "latitude": 40.7952, "longitude": -73.1002, "elevation_ft": 99.0},
+    "SWF": {"name": "Stewart Intl", "latitude": 41.5041, "longitude": -74.1048, "elevation_ft": 491.0},
+    "BOS": {"name": "Boston Logan Intl", "latitude": 42.3656, "longitude": -71.0096, "elevation_ft": 20.0},
+    "PHL": {"name": "Philadelphia Intl", "latitude": 39.8729, "longitude": -75.2437, "elevation_ft": 36.0},
+    "BDL": {"name": "Bradley Intl", "latitude": 41.9389, "longitude": -72.6832, "elevation_ft": 173.0},
+    "ORD": {"name": "Chicago O'Hare", "latitude": 41.9742, "longitude": -87.9073, "elevation_ft": 668.0},
+    "ATL": {"name": "Atlanta Hartsfield", "latitude": 33.6407, "longitude": -84.4277, "elevation_ft": 1026.0},
+}
+
+
+class DataManager:
+    """Loads, indexes, and serves session data efficiently."""
+
+    @staticmethod
+    def _calculate_session_duration_s(sess: dict[str, Any]) -> float:
+        """Calculate the real-world duration in seconds for a session."""
+        samples = sess.get("phase_samples", [])
+        if samples and "time_s" in samples[-1]:
+            try:
+                return float(samples[-1]["time_s"])
+            except (ValueError, TypeError):
+                pass
+        points = sess.get("points", [])
+        if points and len(points[-1]) > 3:
+            try:
+                # points have [lon, lat, alt, t_bin], where each bin is 5.0 seconds
+                return float(points[-1][3]) * 5.0
+            except (ValueError, TypeError):
+                pass
+        return float(sess.get("t_max", 0)) * 5.0
+
+    def __init__(self, sessions_path: Path | str = DEFAULT_SESSIONS_PATH, airports_path: Path | str = DEFAULT_AIRPORTS_PATH):
+        self.sessions_path = Path(sessions_path)
+        self.airports_path = Path(airports_path)
+        self._meta: dict[str, Any] = {}
+        self._sessions_by_id: dict[str, dict[str, Any]] = {}
+        self._aircraft_to_session_ids: dict[str, list[str]] = {}
+        self._aircraft_summaries: list[dict[str, Any]] = []
+        self._airports: dict[str, dict[str, Any]] = dict(KNOWN_AIRPORTS)
+        self._is_loaded = False
+
+    def load_data(self) -> None:
+        """Load session dataset and build indexes in memory."""
+        if self._is_loaded:
+            return
+
+        self._load_airports()
+
+        if not self.sessions_path.is_file():
+            raise FileNotFoundError(f"Continuous sessions file not found at: {self.sessions_path}")
+
+        with open(self.sessions_path, "r", encoding="utf-8") as f:
+            raw_data = json.load(f)
+
+        self._meta = raw_data.get("meta", {})
+        sessions = raw_data.get("sessions", [])
+
+        # Index sessions
+        for s in sessions:
+            sid = s.get("id")
+            ac = s.get("aircraft", "unknown")
+            if not sid:
+                continue
+            self._sessions_by_id[sid] = s
+            if ac not in self._aircraft_to_session_ids:
+                self._aircraft_to_session_ids[ac] = []
+            self._aircraft_to_session_ids[ac].append(sid)
+
+        # Build aircraft summary list
+        summaries = []
+        for ac, sids in self._aircraft_to_session_ids.items():
+            kinds = set()
+            routes = set()
+            total_points = 0
+            max_duration = 0.0
+            phase_counter = Counter()
+
+            for sid in sids:
+                sess = self._sessions_by_id[sid]
+                kind = sess.get("complete_kind") or sess.get("session_type") or "unknown"
+                kinds.add(kind)
+                src = sess.get("src") or "?"
+                dest = sess.get("dest") or "?"
+                routes.add(f"{src}->{dest}")
+                total_points += sess.get("n_points", 0)
+                dur = self._calculate_session_duration_s(sess)
+                if dur > max_duration:
+                    max_duration = dur
+
+                for ps in sess.get("phase_samples", []):
+                    ph = ps.get("phase")
+                    if ph:
+                        phase_counter[ph] += 1
+
+            dom_phase = phase_counter.most_common(1)[0][0] if phase_counter else "unknown"
+
+            summaries.append({
+                "aircraft": ac,
+                "session_count": len(sids),
+                "session_ids": sids,
+                "kinds": sorted(kinds),
+                "routes": sorted(routes)[:4],
+                "total_points": total_points,
+                "max_duration_s": max_duration,
+                "dominant_phase": dom_phase,
+            })
+
+        # Sort aircraft summaries: primary by session count descending, secondary by aircraft id
+        summaries.sort(key=lambda item: (-item["session_count"], item["aircraft"]))
+        self._aircraft_summaries = summaries
+        self._is_loaded = True
+
+    def _load_airports(self) -> None:
+        """Load coordinates from GlobalAirportDatabase if available."""
+        if not self.airports_path.is_file():
+            return
+
+        try:
+            with open(self.airports_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    fields = line.rstrip("\r\n").split(":")
+                    if len(fields) < 16:
+                        continue
+                    code = fields[1].strip().upper()
+                    name = fields[2].strip()
+                    if not code or code in self._airports:
+                        continue
+                    try:
+                        elev = float(fields[-3])
+                        lat = float(fields[-2])
+                        lon = float(fields[-1])
+                        if -90 <= lat <= 90 and -180 <= lon <= 180:
+                            self._airports[code] = {
+                                "name": name,
+                                "latitude": lat,
+                                "longitude": lon,
+                                "elevation_ft": elev,
+                            }
+                    except (ValueError, TypeError):
+                        continue
+        except Exception:
+            pass
+
+    def get_aircraft_list(self) -> list[dict[str, Any]]:
+        """Return list of all aircraft summaries."""
+        if not self._is_loaded:
+            self.load_data()
+        return self._aircraft_summaries
+
+    def get_aircraft_details(self, aircraft_id: str) -> dict[str, Any] | None:
+        """Return aircraft information and metadata for all of its sessions."""
+        if not self._is_loaded:
+            self.load_data()
+
+        sids = self._aircraft_to_session_ids.get(aircraft_id)
+        if not sids:
+            return None
+
+        sessions_info = []
+        for sid in sids:
+            s = self._sessions_by_id[sid]
+            phase_counter = Counter(ps.get("phase", "unknown") for ps in s.get("phase_samples", []))
+            total_phases = sum(phase_counter.values()) or 1
+            phase_pct = {k: round(v / total_phases * 100, 1) for k, v in phase_counter.most_common(5)}
+            dom_phase = phase_counter.most_common(1)[0][0] if phase_counter else "unknown"
+
+            dur = self._calculate_session_duration_s(s)
+            sessions_info.append({
+                "id": sid,
+                "session_type": s.get("session_type", ""),
+                "complete_kind": s.get("complete_kind", ""),
+                "start_kind": s.get("start_kind", ""),
+                "end_kind": s.get("end_kind", ""),
+                "src": s.get("src", ""),
+                "dest": s.get("dest", ""),
+                "n_points": s.get("n_points", 0),
+                "t_max": dur,
+                "duration_s": dur,
+                "dominant_phase": dom_phase,
+                "phase_percentages": phase_pct,
+                "phase_intervals_count": len(s.get("phase_intervals", [])),
+            })
+
+        return {
+            "aircraft": aircraft_id,
+            "session_count": len(sessions_info),
+            "sessions": sessions_info,
+        }
+
+    def get_sessions_batch(self, session_ids: list[str]) -> dict[str, Any]:
+        """Return full trajectory, predicted phases, and context for requested sessions."""
+        if not self._is_loaded:
+            self.load_data()
+
+        result_sessions = []
+        all_lons = []
+        all_lats = []
+        all_alts = []
+        max_time = 0.0
+        used_airports = set()
+
+        for sid in session_ids:
+            s = self._sessions_by_id.get(sid)
+            if not s:
+                continue
+
+            points = s.get("points", [])  # list of [lon, lat, alt_ft, t_bin]
+            phase_samples = s.get("phase_samples", [])
+            phase_intervals = s.get("phase_intervals", [])
+
+            for p in points:
+                if len(p) >= 3:
+                    all_lons.append(p[0])
+                    all_lats.append(p[1])
+                    all_alts.append(p[2])
+
+            dur = self._calculate_session_duration_s(s)
+            if dur > max_time:
+                max_time = dur
+
+            src = s.get("src")
+            dest = s.get("dest")
+            if src:
+                used_airports.add(src.upper())
+            if dest:
+                used_airports.add(dest.upper())
+
+            result_sessions.append({
+                "id": sid,
+                "aircraft": s.get("aircraft", ""),
+                "session_type": s.get("session_type", ""),
+                "complete_kind": s.get("complete_kind", ""),
+                "start_kind": s.get("start_kind", ""),
+                "end_kind": s.get("end_kind", ""),
+                "src": src or "",
+                "dest": dest or "",
+                "t_max": dur,
+                "duration_s": dur,
+                "n_points": len(points),
+                "points": points,
+                "phase_samples": phase_samples,
+                "phase_intervals": phase_intervals,
+            })
+
+        # Calculate bounding box
+        if all_lons and all_lats:
+            lon_pad = max(0.1, (max(all_lons) - min(all_lons)) * 0.08)
+            lat_pad = max(0.1, (max(all_lats) - min(all_lats)) * 0.08)
+            bounds = {
+                "min_lon": min(all_lons) - lon_pad,
+                "max_lon": max(all_lons) + lon_pad,
+                "min_lat": min(all_lats) - lat_pad,
+                "max_lat": max(all_lats) + lat_pad,
+                "min_alt": min(all_alts) if all_alts else 0,
+                "max_alt": max(all_alts) if all_alts else 35000,
+                "max_time_s": max_time,
+            }
+        else:
+            bounds = {
+                "min_lon": -74.5,
+                "max_lon": -72.5,
+                "min_lat": 40.0,
+                "max_lat": 41.5,
+                "min_alt": 0,
+                "max_alt": 35000,
+                "max_time_s": max_time,
+            }
+
+        # Include airport context
+        # Always include JFK, LGA, EWR
+        used_airports.update(["JFK", "LGA", "EWR"])
+        airports_data = []
+        for code in used_airports:
+            if code in self._airports:
+                rec = self._airports[code]
+                airports_data.append({
+                    "code": code,
+                    "name": rec.get("name", code),
+                    "latitude": rec["latitude"],
+                    "longitude": rec["longitude"],
+                    "elevation_ft": rec.get("elevation_ft", 0),
+                })
+
+        return {
+            "sessions": result_sessions,
+            "bounds": bounds,
+            "airports": airports_data,
+        }
+
