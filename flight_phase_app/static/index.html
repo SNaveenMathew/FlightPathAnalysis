@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Flight Phase Explorer & Manual Tagging Studio</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div id="app-container">
+    <!-- Top Navigation Bar -->
+    <header id="top-bar">
+      <div class="brand">
+        <div class="radar-icon">
+          <div class="radar-sweep"></div>
+        </div>
+        <div class="brand-text">
+          <h1>Flight Phase Explorer</h1>
+          <span class="subtitle">Trajectory Animation & Manual Tagging Studio</span>
+        </div>
+      </div>
+
+      <div class="header-center">
+        <div class="active-selection-badge" id="selection-summary">
+          Loading dataset...
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <button id="btn-eval-modal" class="btn btn-outline" title="Evaluate agreement and refine model heuristics">
+          <span class="icon">📊</span> Refinement & Report
+        </button>
+        <button id="btn-export-tags" class="btn btn-outline" title="Export manual tags to CSV">
+          <span class="icon">💾</span> Export Tags
+        </button>
+        <button id="btn-help-modal" class="btn btn-icon" title="Shortcuts & Instructions">
+          <span class="icon">❓</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Workspace -->
+    <div id="main-layout">
+      <!-- Left Sidebar: Selection & Tagging -->
+      <aside id="sidebar">
+        <!-- Step 1: Aircraft Selection -->
+        <section class="sidebar-section">
+          <div class="section-header">
+            <span class="step-num">1</span>
+            <h2>Select Aircraft</h2>
+          </div>
+          <div class="input-group">
+            <input type="text" id="ac-search-input" placeholder="Search hex ID or route (e.g. a387f0)..." autocomplete="off">
+          </div>
+          <div class="select-wrapper">
+            <select id="aircraft-selector" size="6" aria-label="Aircraft list">
+              <!-- Populated dynamically -->
+            </select>
+          </div>
+          <div id="ac-meta-card" class="info-card">
+            <div class="info-row">
+              <span class="label">Aircraft ID:</span>
+              <span class="value mono" id="meta-ac-id">-</span>
+            </div>
+            <div class="info-row">
+              <span class="label">Total Sessions:</span>
+              <span class="value" id="meta-ac-sessions">-</span>
+            </div>
+            <div class="info-row">
+              <span class="label">Routes:</span>
+              <span class="value" id="meta-ac-routes">-</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Step 2: Sessions Selection (defaults to all) -->
+        <section class="sidebar-section">
+          <div class="section-header">
+            <span class="step-num">2</span>
+            <h2>Select Sessions</h2>
+            <div class="selection-toggles">
+              <button id="btn-select-all-sessions" class="btn-micro" title="Select all sessions of this aircraft">All (Default)</button>
+              <button id="btn-select-none-sessions" class="btn-micro" title="Clear selection">Clear</button>
+            </div>
+          </div>
+          <div class="session-default-hint">
+            Defaults to all sessions when aircraft is selected. Toggle individual sessions below:
+          </div>
+          <div id="sessions-container" class="sessions-list">
+            <!-- Session cards populated dynamically -->
+          </div>
+        </section>
+
+        <!-- Step 3: Manual Flight Phase Tagging Studio -->
+        <section class="sidebar-section tagging-section">
+          <div class="section-header">
+            <span class="step-num">3</span>
+            <h2>Manual Phase Tagging</h2>
+          </div>
+
+          <div class="tag-controls">
+            <div class="form-row">
+              <label for="tag-target-session">Target Session:</label>
+              <select id="tag-target-session" class="select-sm">
+                <!-- Session options -->
+              </select>
+            </div>
+
+            <div class="time-range-group">
+              <div class="time-input-col">
+                <label>Start Time (s):</label>
+                <div class="time-input-row">
+                  <input type="number" id="tag-t-start" min="0" step="1" value="0">
+                  <button id="btn-set-t-start" class="btn-micro" title="Set to current animation time head">[ Cursor</button>
+                </div>
+              </div>
+              <div class="time-input-col">
+                <label>End Time (s):</label>
+                <div class="time-input-row">
+                  <input type="number" id="tag-t-end" min="0" step="1" value="30">
+                  <button id="btn-set-t-end" class="btn-micro" title="Set to current animation time head">Cursor ]</button>
+                </div>
+              </div>
+            </div>
+
+            <button id="btn-tag-instant" class="btn-micro btn-block" title="Tag current single point">
+              🎯 Tag Current Instant (Single Point)
+            </button>
+
+            <label class="section-sublabel">Select Phase to Tag:</label>
+            <div class="phase-buttons-grid" id="phase-buttons-grid">
+              <!-- Dynamically populated or static standard phases -->
+              <button type="button" class="phase-btn" data-phase="ground" style="--p-color: #9aa9bd;">Ground</button>
+              <button type="button" class="phase-btn" data-phase="initial_climb" style="--p-color: #ff9f43;">Initial Climb</button>
+              <button type="button" class="phase-btn" data-phase="climb" style="--p-color: #ff5b5b;">Climb</button>
+              <button type="button" class="phase-btn" data-phase="cruise" style="--p-color: #bb86fc;">Cruise</button>
+              <button type="button" class="phase-btn" data-phase="level_flight" style="--p-color: #45d6c5;">Level Flight</button>
+              <button type="button" class="phase-btn" data-phase="descent" style="--p-color: #5fa8ff;">Descent</button>
+              <button type="button" class="phase-btn" data-phase="approach" style="--p-color: #35d49a;">Approach</button>
+              <button type="button" class="phase-btn" data-phase="landing" style="--p-color: #ffe066;">Landing</button>
+              <button type="button" class="phase-btn" data-phase="landing_roll" style="--p-color: #f4a261;">Landing Roll</button>
+              <button type="button" class="phase-btn" data-phase="go_around_climb_candidate" style="--p-color: #ff5ec4;">Go-Around</button>
+              <button type="button" class="phase-btn" data-phase="airborne_transition" style="--p-color: #d8e5f2;">Transition</button>
+              <button type="button" class="phase-btn" data-phase="unknown" style="--p-color: #687588;">Unknown</button>
+            </div>
+
+            <div class="form-row">
+              <label for="tag-confidence">Confidence:</label>
+              <select id="tag-confidence" class="select-sm">
+                <option value="high" selected>High (Clear ADS-B evidence)</option>
+                <option value="medium">Medium (Plausible boundary)</option>
+                <option value="low">Low (Ambiguous / Gap)</option>
+              </select>
+            </div>
+
+            <div class="form-row">
+              <label for="tag-notes">Rationale / Notes:</label>
+              <input type="text" id="tag-notes" placeholder="e.g. Flare & touchdown at t=340s; model was late">
+            </div>
+
+            <button id="btn-apply-tag" class="btn btn-primary btn-block">
+              <span class="icon">🏷️</span> Save Manual Tag
+            </button>
+          </div>
+
+          <!-- Existing Manual Tags List -->
+          <div class="tags-history">
+            <div class="tags-history-header">
+              <h3>Saved Manual Tags (<span id="tags-count">0</span>)</h3>
+            </div>
+            <div id="tags-list" class="tags-list">
+              <div class="empty-hint">No manual tags applied to this aircraft yet.</div>
+            </div>
+          </div>
+        </section>
+      </aside>
+
+      <!-- Center / Right: Radar Map, Timeline & Controls -->
+      <main id="content-area">
+        <!-- Visualizer Top Bar: Display Options -->
+        <div id="viz-toolbar">
+          <div class="toolbar-left">
+            <span class="view-title">2D Radar Flight Track</span>
+            <div class="color-mode-toggle">
+              <label>Coloring:</label>
+              <button id="btn-color-phase" class="btn-toggle active" data-mode="phase">Flight Phase</button>
+              <button id="btn-color-session" class="btn-toggle" data-mode="session">Session ID</button>
+            </div>
+            <label class="checkbox-label">
+              <input type="checkbox" id="chk-show-airports" checked> Show Airports
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="chk-show-tags-overlay" checked> Highlight Manual Tags
+            </label>
+          </div>
+
+          <div class="toolbar-right">
+            <button id="btn-zoom-in" class="btn-icon" title="Zoom In">+</button>
+            <button id="btn-zoom-out" class="btn-icon" title="Zoom Out">−</button>
+            <button id="btn-zoom-reset" class="btn-icon" title="Reset View">⤢</button>
+            <button id="btn-follow-ac" class="btn-toggle active" title="Center on active aircraft">Follow ✈</button>
+          </div>
+        </div>
+
+        <!-- 2D Canvas Radar / Map -->
+        <div id="canvas-container">
+          <canvas id="radar-canvas"></canvas>
+
+          <!-- On-Canvas HUD Telemetry Overlay -->
+          <div id="radar-hud">
+            <div class="hud-item"><span class="hud-label">ALT</span><span class="hud-val mono" id="hud-alt">- ft</span></div>
+            <div class="hud-item"><span class="hud-label">GS</span><span class="hud-val mono" id="hud-spd">- kts</span></div>
+            <div class="hud-item"><span class="hud-label">V/S</span><span class="hud-val mono" id="hud-vs">- fpm</span></div>
+            <div class="hud-item"><span class="hud-label">PRED</span><span class="hud-badge mono" id="hud-pred-phase">-</span></div>
+            <div class="hud-item"><span class="hud-label">MANUAL</span><span class="hud-badge mono" id="hud-manual-phase">None</span></div>
+          </div>
+
+          <!-- Phase Color Legend -->
+          <div id="radar-legend" class="radar-legend">
+            <span class="legend-title">Phases:</span>
+            <span class="leg-item"><i class="leg-swatch" style="background:#9aa9bd;"></i>Ground</span>
+            <span class="leg-item"><i class="leg-swatch" style="background:#ff9f43;"></i>Initial Climb</span>
+            <span class="leg-item"><i class="leg-swatch" style="background:#ff5b5b;"></i>Climb</span>
+            <span class="leg-item"><i class="leg-swatch" style="background:#bb86fc;"></i>Cruise</span>
+            <span class="leg-item"><i class="leg-swatch" style="background:#45d6c5;"></i>Level</span>
+            <span class="leg-item"><i class="leg-swatch" style="background:#5fa8ff;"></i>Descent</span>
+            <span class="leg-item"><i class="leg-swatch" style="background:#35d49a;"></i>Approach</span>
+            <span class="leg-item"><i class="leg-swatch" style="background:#ffe066;"></i>Landing</span>
+            <span class="leg-item"><i class="leg-swatch" style="background:#f4a261;"></i>Landing Roll</span>
+            <span class="leg-item"><i class="leg-swatch" style="background:#ff5ec4;"></i>Go-Around</span>
+          </div>
+        </div>
+
+        <!-- Synchronized Timeline & Phase Ribbons Panel -->
+        <div id="timeline-panel">
+          <div class="timeline-header">
+            <span class="timeline-title">Synchronized Phase Ribbons & Altitude Profile</span>
+            <span class="timeline-hint">💡 Tip: Click and drag across timeline to select time range for manual tagging</span>
+          </div>
+
+          <!-- Phase Comparison Ribbons -->
+          <div class="ribbons-wrapper">
+            <div class="ribbon-row">
+              <span class="ribbon-label">PREDICTED:</span>
+              <div class="ribbon-track" id="predicted-ribbon"></div>
+            </div>
+            <div class="ribbon-row">
+              <span class="ribbon-label">MANUAL:</span>
+              <div class="ribbon-track" id="manual-ribbon"></div>
+            </div>
+          </div>
+
+          <!-- Altitude & Speed Canvas Graph -->
+          <div class="altitude-chart-container">
+            <canvas id="altitude-canvas"></canvas>
+            <div id="timeline-scrubber-line"></div>
+            <div id="timeline-selection-box"></div>
+          </div>
+        </div>
+
+        <!-- Playback & Animation Controller Footer -->
+        <footer id="playback-footer">
+          <div class="controls-left">
+            <button id="btn-play-pause" class="btn btn-primary btn-play">
+              <span class="icon">▶</span> Play
+            </button>
+            <button id="btn-step-back" class="btn btn-icon" title="Step back 5 seconds">⏪ -5s</button>
+            <button id="btn-step-fwd" class="btn btn-icon" title="Step forward 5 seconds">+5s ⏩</button>
+            <button id="btn-loop" class="btn-toggle active" title="Toggle Loop Playback">🔁 Loop</button>
+          </div>
+
+          <div class="controls-center">
+            <span class="time-display mono" id="time-display">00:00 / 00:00</span>
+            <input type="range" id="time-scrubber" min="0" max="100" value="0" step="0.5">
+            <span class="time-sec-display mono" id="time-sec-display">(t = 0s)</span>
+          </div>
+
+          <div class="controls-right">
+            <span class="speed-label">Speed:</span>
+            <div class="speed-buttons">
+              <button class="btn-speed" data-speed="1">1×</button>
+              <button class="btn-speed" data-speed="2">2×</button>
+              <button class="btn-speed" data-speed="5">5×</button>
+              <button class="btn-speed active" data-speed="10">10×</button>
+              <button class="btn-speed" data-speed="25">25×</button>
+              <button class="btn-speed" data-speed="50">50×</button>
+              <button class="btn-speed" data-speed="100">100×</button>
+            </div>
+          </div>
+        </footer>
+      </main>
+    </div>
+
+    <!-- Evaluation & Refinement Modal -->
+    <div id="eval-modal" class="modal-overlay hidden">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h2>📊 Flight Phase Refinement & Evaluation Studio</h2>
+          <button class="btn-close-modal" id="btn-close-eval">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="eval-metrics-grid">
+            <div class="metric-card">
+              <span class="metric-title">Agreement Rate</span>
+              <span class="metric-value" id="eval-agreement-rate">-%</span>
+              <span class="metric-sub" id="eval-matched-points">0 / 0 points</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-title">Total Human Tags</span>
+              <span class="metric-value" id="eval-total-tags">0</span>
+              <span class="metric-sub">Across selected aircraft</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-title">Disagreements</span>
+              <span class="metric-value" id="eval-total-disagreements">0</span>
+              <span class="metric-sub">Points where human != model</span>
+            </div>
+          </div>
+
+          <!-- Refinement Recommendations for flight_phase.py -->
+          <div class="eval-section">
+            <h3>🔬 Heuristic Refinement Guidance for <code class="mono">flight_phase.py</code></h3>
+            <div class="guidance-box" id="eval-suggestions-box">
+              Loading recommendations...
+            </div>
+          </div>
+
+          <!-- Confusion Matrix Table -->
+          <div class="eval-section">
+            <h3>Confusion Matrix (Manual Ground Truth vs Algorithm Prediction)</h3>
+            <div class="table-wrapper">
+              <table id="confusion-matrix-table" class="data-table">
+                <!-- Rendered dynamically -->
+              </table>
+            </div>
+          </div>
+
+          <!-- Disagreements Audit Log -->
+          <div class="eval-section">
+            <h3>Disagreements Breakdown</h3>
+            <div class="table-wrapper max-h">
+              <table id="disagreements-table" class="data-table">
+                <thead>
+                  <tr>
+                    <th>Time (s)</th>
+                    <th>Altitude</th>
+                    <th>Manual Tag</th>
+                    <th>Model Prediction</th>
+                    <th>Confidence</th>
+                    <th>Model Evidence</th>
+                    <th>User Notes</th>
+                  </tr>
+                </thead>
+                <tbody id="disagreements-body">
+                  <!-- Rendered dynamically -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-primary" id="btn-download-audit-csv">Export Evaluation CSV</button>
+          <button class="btn btn-outline" id="btn-close-eval-bottom">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Help & Instructions Modal -->
+    <div id="help-modal" class="modal-overlay hidden">
+      <div class="modal-card modal-sm">
+        <div class="modal-header">
+          <h2>💡 Instructions & Keyboard Shortcuts</h2>
+          <button class="btn-close-modal" id="btn-close-help">✕</button>
+        </div>
+        <div class="modal-body">
+          <h3>Workflow:</h3>
+          <ol class="workflow-steps">
+            <li><strong>Select Aircraft:</strong> Choose any aircraft from the dropdown or search by hex ID.</li>
+            <li><strong>Select Sessions:</strong> All sessions of the aircraft are selected by default. Toggle checkboxes to isolate or compare sessions.</li>
+            <li><strong>Animate & Inspect:</strong> Hit Play or drag the scrubber. Watch the aircraft traverse its path with synchronized altitude and phase ribbons.</li>
+            <li><strong>Manual Tagging:</strong> Click and drag on the timeline (or use `[` and `]`) to specify start/end time. Select a phase and click <em>Save Manual Tag</em>.</li>
+            <li><strong>Refine Heuristics:</strong> Open <em>Refinement & Report</em> to see the agreement matrix and suggestions for tuning thresholds in <code>02-Preprocessing/flight_phase.py</code>.</li>
+          </ol>
+
+          <h3>Keyboard Shortcuts:</h3>
+          <ul class="shortcuts-list">
+            <li><kbd>Space</kbd> : Play / Pause animation</li>
+            <li><kbd>←</kbd> / <kbd>→</kbd> : Step 5s backward / forward</li>
+            <li><kbd>[</kbd> : Set tag start time to current playhead</li>
+            <li><kbd>]</kbd> : Set tag end time to current playhead</li>
+            <li><kbd>Esc</kbd> : Close modals</li>
+          </ul>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-primary" id="btn-close-help-bottom">Got it!</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
+
