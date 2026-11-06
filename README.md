@@ -78,7 +78,7 @@ prerequisites or alternatives.
    Open <http://127.0.0.1:8000> to:
    - **Choose an Aircraft:** Search and pick any aircraft (e.g. `a387f0`, `a0be05`).
    - **Select Sessions:** Defaults to all sessions of the aircraft automatically; toggle individual sessions on/off to compare or isolate specific flights.
-   - **Animate Predicted Phases:** Watch the aircraft traverse its trajectory on an interactive 2D radar display with synchronized altitude profile, ground speed, and vertical rate telemetry.
+   - **Animate Predicted Phases in 3D:** Watch the aircraft traverse its trajectory in an interactive 3D WebGL scene preserving the radar look and feel. Starts in top-down `(lon, lat)` planar view and smoothly rotates/orbits into 3D to inspect the vertical altitude dimension, with synchronized altitude profile and telemetry.
    - **Manual Phase Tagging:** Select time ranges by clicking/dragging on the timeline or using `[` and `]`, assign manual phase labels (`ground`, `initial_climb`, `climb`, `cruise`, `level_flight`, `descent`, `approach`, `landing`, `landing_roll`, `go_around_climb_candidate`, `airborne_transition`), and save rationale notes.
    - **Model Refinement & Evaluation:** Open the in-app *Refinement & Report* modal or run `python evaluate_manual_tags.py` to evaluate agreement rate, inspect confusion matrices, and view concrete recommendations for tuning heuristic thresholds in `02-Preprocessing/flight_phase.py`.
 
