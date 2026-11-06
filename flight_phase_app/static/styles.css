@@ -551,6 +551,12 @@ html, body {
 }
 
 /* 2D Canvas Radar */
+.view-mode-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 #canvas-container {
   flex: 1;
   position: relative;
@@ -559,9 +565,18 @@ html, body {
   background: #070c17;
 }
 
-#radar-canvas {
+#three-container {
   width: 100%;
   height: 100%;
+  position: absolute;
+  inset: 0;
+  display: block;
+  outline: none;
+}
+
+#three-container canvas {
+  width: 100% !important;
+  height: 100% !important;
   display: block;
 }
 
@@ -745,6 +760,23 @@ html, body {
   pointer-events: none;
   left: 0%;
   z-index: 4;
+}
+
+.altitude-tooltip {
+  position: absolute;
+  top: 8px;
+  background: rgba(15, 23, 42, 0.95);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: #fff;
+  pointer-events: none;
+  z-index: 10;
+  display: none;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  white-space: nowrap;
 }
 
 #timeline-selection-box {

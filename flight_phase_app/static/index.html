@@ -183,31 +183,38 @@
         <!-- Visualizer Top Bar: Display Options -->
         <div id="viz-toolbar">
           <div class="toolbar-left">
-            <span class="view-title">2D Radar Flight Track</span>
+            <span class="view-title">3D Trajectory</span>
+            <div class="view-mode-toggle">
+              <button id="btn-view-planar" class="btn-toggle active" title="Top-down (lon, lat) planar view">2D Planar</button>
+              <button id="btn-view-3d" class="btn-toggle" title="Tilt into 3D isometric view to inspect altitude">3D Orbit</button>
+            </div>
             <div class="color-mode-toggle">
               <label>Coloring:</label>
               <button id="btn-color-phase" class="btn-toggle active" data-mode="phase">Flight Phase</button>
               <button id="btn-color-session" class="btn-toggle" data-mode="session">Session ID</button>
             </div>
             <label class="checkbox-label">
-              <input type="checkbox" id="chk-show-airports" checked> Show Airports
+              <input type="checkbox" id="chk-show-airports" checked> Airports
             </label>
             <label class="checkbox-label">
-              <input type="checkbox" id="chk-show-tags-overlay" checked> Highlight Manual Tags
+              <input type="checkbox" id="chk-show-shadow" checked> Ground Track
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="chk-show-tags-overlay" checked> Manual Tags
             </label>
           </div>
 
           <div class="toolbar-right">
             <button id="btn-zoom-in" class="btn-icon" title="Zoom In">+</button>
             <button id="btn-zoom-out" class="btn-icon" title="Zoom Out">−</button>
-            <button id="btn-zoom-reset" class="btn-icon" title="Reset View">⤢</button>
-            <button id="btn-follow-ac" class="btn-toggle active" title="Center on active aircraft">Follow ✈</button>
+            <button id="btn-zoom-reset" class="btn-icon" title="Reset View">⤢ Reset</button>
+            <button id="btn-follow-ac" class="btn-toggle active" title="Center camera on active aircraft">Follow ✈</button>
           </div>
         </div>
 
-        <!-- 2D Canvas Radar / Map -->
+        <!-- 3D Canvas / Radar Container -->
         <div id="canvas-container">
-          <canvas id="radar-canvas"></canvas>
+          <div id="three-container"></div>
 
           <!-- On-Canvas HUD Telemetry Overlay -->
           <div id="radar-hud">
@@ -258,6 +265,7 @@
             <canvas id="altitude-canvas"></canvas>
             <div id="timeline-scrubber-line"></div>
             <div id="timeline-selection-box"></div>
+            <div id="altitude-tooltip" class="altitude-tooltip"></div>
           </div>
         </div>
 
@@ -402,6 +410,7 @@
 
   </div>
 
+  <script src="/static/three.min.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

@@ -1,6 +1,6 @@
 /**
  * Flight Phase Explorer & Manual Tagging Studio
- * Interactive frontend application
+ * 3D Trajectory Animation & Manual Tagging Studio
  */
 
 (() => {
@@ -49,17 +49,14 @@
     loop: true,
     lastFrameTime: 0,
 
-    // Visualization Options
+    // 3D Visualization Options
+    viewMode: 'planar', // 'planar' (top-down lon, lat) or '3d' (isometric / rotated)
+    verticalScale: 2.5, // vertical altitude scale factor
     colorMode: 'phase', // 'phase' or 'session'
     showAirports: true,
+    showGroundTrack: true,
     showTagsOverlay: true,
     followAircraft: true,
-
-    // Map Transform
-    mapZoom: 1,
-    mapPan: { x: 0, y: 0 },
-    isDraggingMap: false,
-    dragStart: { x: 0, y: 0 },
 
     // Timeline Drag Selection
     isSelectingTimeline: false,
@@ -93,16 +90,19 @@
     tagsList: document.getElementById('tags-list'),
     tagsCount: document.getElementById('tags-count'),
 
+    btnViewPlanar: document.getElementById('btn-view-planar'),
+    btnView3D: document.getElementById('btn-view-3d'),
     btnColorPhase: document.getElementById('btn-color-phase'),
     btnColorSession: document.getElementById('btn-color-session'),
     chkShowAirports: document.getElementById('chk-show-airports'),
+    chkShowShadow: document.getElementById('chk-show-shadow'),
     chkShowTagsOverlay: document.getElementById('chk-show-tags-overlay'),
     btnZoomIn: document.getElementById('btn-zoom-in'),
     btnZoomOut: document.getElementById('btn-zoom-out'),
     btnZoomReset: document.getElementById('btn-zoom-reset'),
     btnFollowAc: document.getElementById('btn-follow-ac'),
 
-    radarCanvas: document.getElementById('radar-canvas'),
+    threeContainer: document.getElementById('three-container'),
     hudAlt: document.getElementById('hud-alt'),
     hudSpd: document.getElementById('hud-spd'),
     hudVs: document.getElementById('hud-vs'),
@@ -112,6 +112,7 @@
     predictedRibbon: document.getElementById('predicted-ribbon'),
     manualRibbon: document.getElementById('manual-ribbon'),
     altitudeCanvas: document.getElementById('altitude-canvas'),
+    altitudeTooltip: document.getElementById('altitude-tooltip'),
     scrubberLine: document.getElementById('timeline-scrubber-line'),
     selectionBox: document.getElementById('timeline-selection-box'),
 
@@ -145,11 +146,91 @@
     btnCloseHelpBottom: document.getElementById('btn-close-help-bottom'),
   };
 
-  const radarCtx = el.radarCanvas.getContext('2d');
   const altCtx = el.altitudeCanvas.getContext('2d');
+
+  // Three.js Objects
+  let renderer = null;
+  let scene = null;
+  let camera = null;
+  let groundGroup = null;
+  let trajectoriesGroup = null;
+  let aircraftGroup = null;
+  let airportSpritesGroup = null;
+  let aircraftMeshes = new Map(); // sessionId -> { mesh, dropLine, sprite }
+  let trajectoryObjects = [];
+
+  // Anchor & Geographic projection reference (JFK)
+  const REF_ORIGIN = { lon: -73.7789, lat: 40.6398 };
+  const KM_PER_LAT = 111.32;
+  const KM_PER_LON = 111.32 * Math.cos((REF_ORIGIN.lat * Math.PI) / 180.0);
+
+  // 3D Orbit Camera Controller
+  const orbit = {
+    target: new THREE.Vector3(0, 0, 0),
+    theta: 0,            // Azimuth angle around Y axis
+    phi: 0.001,          // Polar angle from Y axis (0.001 = Planar Top-Down looking straight down)
+    radius: 180,         // Distance from target
+    dragging: false,
+    dragButton: 0,       // 0 = left (rotate), 2 = right (pan)
+    lastX: 0,
+    lastY: 0,
+    isPlanar: true,
+
+    setPlanar() {
+      this.phi = 0.001;
+      this.theta = 0;
+      this.isPlanar = true;
+      state.viewMode = 'planar';
+      if (el.btnViewPlanar) el.btnViewPlanar.classList.add('active');
+      if (el.btnView3D) el.btnView3D.classList.remove('active');
+      this.update();
+    },
+
+    set3D() {
+      this.phi = Math.PI / 3.4; // ~53° elevation
+      this.theta = 0.55;        // slight angle
+      this.isPlanar = false;
+      state.viewMode = '3d';
+      if (el.btnView3D) el.btnView3D.classList.add('active');
+      if (el.btnViewPlanar) el.btnViewPlanar.classList.remove('active');
+      this.update();
+    },
+
+    update() {
+      if (!camera) return;
+      const sinPhi = Math.sin(this.phi);
+      const cosPhi = Math.cos(this.phi);
+
+      camera.position.set(
+        this.target.x + this.radius * sinPhi * Math.sin(this.theta),
+        this.target.y + this.radius * cosPhi,
+        this.target.z + this.radius * sinPhi * Math.cos(this.theta)
+      );
+
+      // In pure planar top-down view (looking down along -Y), set camera.up to North (0, 0, -1)
+      if (this.phi < 0.05) {
+        camera.up.set(0, 0, -1);
+      } else {
+        camera.up.set(0, 1, 0);
+      }
+
+      camera.lookAt(this.target);
+    },
+  };
+
+  // Convert (lon, lat, alt_ft) to 3D Cartesian coordinates
+  function worldTo3D(lon, lat, altFt, midLon, midLat) {
+    const x = (lon - midLon) * KM_PER_LON;
+    // Y is Altitude in km * vertical scale
+    const y = ((altFt || 0) * 0.0003048) * state.verticalScale;
+    // Z is Latitude (North is -Z, South is +Z)
+    const z = -(lat - midLat) * KM_PER_LAT;
+    return new THREE.Vector3(x, y, z);
+  }
 
   // Initialization
   async function init() {
+    initThreeScene();
     setupEventListeners();
     handleResize();
     window.addEventListener('resize', handleResize);
@@ -162,10 +243,9 @@
 
       renderAircraftList(state.aircraftList);
 
-      // Auto-select first aircraft with multiple sessions
+      // Auto-select first aircraft
       if (state.aircraftList.length > 0) {
-        const defaultAc = state.aircraftList[0].aircraft;
-        selectAircraft(defaultAc);
+        selectAircraft(state.aircraftList[0].aircraft);
       }
     } catch (err) {
       console.error(err);
@@ -175,7 +255,48 @@
     requestAnimationFrame(animationLoop);
   }
 
-  // Event Listeners Setup
+  // Initialize Three.js 3D WebGL Scene
+  function initThreeScene() {
+    const container = el.threeContainer;
+    const width = container.clientWidth || 800;
+    const height = container.clientHeight || 500;
+
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setSize(width, height);
+    renderer.setClearColor('#070c17', 1);
+    container.appendChild(renderer.domElement);
+
+    scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x070c17, 0.0007);
+
+    // Perspective camera
+    camera = new THREE.PerspectiveCamera(46, width / Math.max(1, height), 0.1, 4000);
+
+    // Ambient and directional lighting for 3D depth
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+    scene.add(ambientLight);
+
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+    dirLight.position.set(100, 200, 100);
+    scene.add(dirLight);
+
+    // Groups for organized rendering
+    groundGroup = new THREE.Group();
+    trajectoriesGroup = new THREE.Group();
+    aircraftGroup = new THREE.Group();
+    airportSpritesGroup = new THREE.Group();
+
+    scene.add(groundGroup);
+    scene.add(trajectoriesGroup);
+    scene.add(aircraftGroup);
+    scene.add(airportSpritesGroup);
+
+    // Start in Planar Top-Down View (Requirement: "Show the (lon, lat) planar view at first")
+    orbit.setPlanar();
+  }
+
+  // Setup Event Listeners
   function setupEventListeners() {
     // Aircraft search
     el.acSearchInput.addEventListener('input', (e) => {
@@ -186,14 +307,14 @@
       renderAircraftList(filtered);
     });
 
-    // Aircraft dropdown change
+    // Aircraft selector change
     el.aircraftSelector.addEventListener('change', (e) => {
       if (e.target.value) {
         selectAircraft(e.target.value);
       }
     });
 
-    // Session buttons
+    // Sessions Selection buttons
     el.btnSelectAllSessions.addEventListener('click', () => {
       if (!state.aircraftDetails) return;
       state.selectedSessionIds = new Set(state.aircraftDetails.sessions.map(s => s.id));
@@ -206,57 +327,74 @@
       syncSessionCheckboxes();
       state.sessionsData = [];
       updateTimelineAndRibbons();
-      renderRadar();
+      rebuild3DScene();
     });
+
+    // 2D Planar vs 3D Orbit View Toggles
+    if (el.btnViewPlanar) {
+      el.btnViewPlanar.addEventListener('click', () => {
+        orbit.setPlanar();
+      });
+    }
+
+    if (el.btnView3D) {
+      el.btnView3D.addEventListener('click', () => {
+        orbit.set3D();
+      });
+    }
 
     // Color mode toggle
     el.btnColorPhase.addEventListener('click', () => {
       state.colorMode = 'phase';
       el.btnColorPhase.classList.add('active');
       el.btnColorSession.classList.remove('active');
-      renderRadar();
+      rebuild3DScene();
     });
 
     el.btnColorSession.addEventListener('click', () => {
       state.colorMode = 'session';
       el.btnColorSession.classList.add('active');
       el.btnColorPhase.classList.remove('active');
-      renderRadar();
+      rebuild3DScene();
     });
 
     // Toggles
     el.chkShowAirports.addEventListener('change', (e) => {
       state.showAirports = e.target.checked;
-      renderRadar();
+      if (airportSpritesGroup) airportSpritesGroup.visible = state.showAirports;
     });
+
+    if (el.chkShowShadow) {
+      el.chkShowShadow.addEventListener('change', (e) => {
+        state.showGroundTrack = e.target.checked;
+        rebuild3DScene();
+      });
+    }
 
     el.chkShowTagsOverlay.addEventListener('change', (e) => {
       state.showTagsOverlay = e.target.checked;
-      renderRadar();
+      rebuild3DScene();
     });
 
     el.btnFollowAc.addEventListener('click', () => {
       state.followAircraft = !state.followAircraft;
       el.btnFollowAc.classList.toggle('active', state.followAircraft);
-      if (state.followAircraft) {
-        state.mapPan = { x: 0, y: 0 };
-        renderRadar();
-      }
     });
 
-    // Zoom controls
+    // Zoom and Camera Controls
     el.btnZoomIn.addEventListener('click', () => {
-      state.mapZoom *= 1.25;
-      renderRadar();
+      orbit.radius = Math.max(15, orbit.radius * 0.8);
+      orbit.update();
     });
     el.btnZoomOut.addEventListener('click', () => {
-      state.mapZoom = Math.max(0.5, state.mapZoom / 1.25);
-      renderRadar();
+      orbit.radius = Math.min(1000, orbit.radius * 1.25);
+      orbit.update();
     });
     el.btnZoomReset.addEventListener('click', () => {
-      state.mapZoom = 1;
-      state.mapPan = { x: 0, y: 0 };
-      renderRadar();
+      orbit.target.set(0, 0, 0);
+      orbit.radius = 180;
+      if (state.viewMode === 'planar') orbit.setPlanar();
+      else orbit.set3D();
     });
 
     // Playback Controls
@@ -310,47 +448,96 @@
         state.activeTagPhase = btn.dataset.phase;
       });
     });
-    // Set default selected phase button
     const defaultPhaseBtn = el.phaseButtonsGrid.querySelector('[data-phase="approach"]');
     if (defaultPhaseBtn) defaultPhaseBtn.classList.add('selected');
 
     el.btnApplyTag.addEventListener('click', applyManualTag);
 
-    // Target session dropdown change
+    // Target session dropdown
     el.tagTargetSession.addEventListener('change', (e) => {
       state.focusedSessionId = e.target.value;
       updateTimelineAndRibbons();
-      renderRadar();
+      syncSessionFocusHighlight();
     });
 
-    // Radar Canvas Pan / Drag
-    el.radarCanvas.addEventListener('mousedown', (e) => {
-      state.isDraggingMap = true;
-      state.dragStart = { x: e.clientX - state.mapPan.x, y: e.clientY - state.mapPan.y };
-      state.followAircraft = false;
-      el.btnFollowAc.classList.remove('active');
+    // 3D Mouse & Orbit Interaction (Rotate, Pan, Zoom, Click)
+    const dom = renderer.domElement;
+    let mouseDownPos = { x: 0, y: 0 };
+
+    dom.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    dom.addEventListener('pointerdown', (e) => {
+      orbit.dragging = true;
+      orbit.dragButton = e.button; // 0 = rotate, 2 = pan
+      orbit.lastX = e.clientX;
+      orbit.lastY = e.clientY;
+      mouseDownPos = { x: e.clientX, y: e.clientY };
+      dom.setPointerCapture(e.pointerId);
     });
 
-    window.addEventListener('mousemove', (e) => {
-      if (state.isDraggingMap) {
-        state.mapPan.x = e.clientX - state.dragStart.x;
-        state.mapPan.y = e.clientY - state.dragStart.y;
-        renderRadar();
+    dom.addEventListener('pointermove', (e) => {
+      if (!orbit.dragging) return;
+      const dx = e.clientX - orbit.lastX;
+      const dy = e.clientY - orbit.lastY;
+      orbit.lastX = e.clientX;
+      orbit.lastY = e.clientY;
+
+      if (orbit.dragButton === 0) {
+        // Orbit Rotate (Left Button)
+        orbit.theta -= dx * 0.006;
+        orbit.phi = Math.max(0.001, Math.min(Math.PI / 2 - 0.02, orbit.phi + dy * 0.006));
+
+        // When tilted away from top-down, update view mode indicator to 3D Orbit
+        if (orbit.phi > 0.08) {
+          orbit.isPlanar = false;
+          state.viewMode = '3d';
+          if (el.btnView3D) el.btnView3D.classList.add('active');
+          if (el.btnViewPlanar) el.btnViewPlanar.classList.remove('active');
+        } else {
+          orbit.isPlanar = true;
+          state.viewMode = 'planar';
+          if (el.btnViewPlanar) el.btnViewPlanar.classList.add('active');
+          if (el.btnView3D) el.btnView3D.classList.remove('active');
+        }
+
+        orbit.update();
+      } else if (orbit.dragButton === 2) {
+        // Pan Target (Right Button)
+        state.followAircraft = false;
+        el.btnFollowAc.classList.remove('active');
+
+        const panSpeed = orbit.radius * 0.0012;
+        const forward = new THREE.Vector3();
+        camera.getWorldDirection(forward);
+        const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
+        const up = new THREE.Vector3().crossVectors(right, forward).normalize();
+
+        orbit.target.addScaledVector(right, -dx * panSpeed);
+        orbit.target.addScaledVector(up, dy * panSpeed);
+        orbit.update();
       }
     });
 
-    window.addEventListener('mouseup', () => {
-      state.isDraggingMap = false;
+    dom.addEventListener('pointerup', (e) => {
+      orbit.dragging = false;
+      if (dom.hasPointerCapture(e.pointerId)) {
+        dom.releasePointerCapture(e.pointerId);
+      }
+
+      // Detect click (not drag) for 3D trajectory segment picking
+      if (Math.hypot(e.clientX - mouseDownPos.x, e.clientY - mouseDownPos.y) < 5) {
+        handle3DClick(e);
+      }
     });
 
-    el.radarCanvas.addEventListener('wheel', (e) => {
+    dom.addEventListener('wheel', (e) => {
       e.preventDefault();
-      const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85;
-      state.mapZoom = Math.max(0.3, Math.min(20, state.mapZoom * zoomFactor));
-      renderRadar();
-    });
+      const zoomFactor = e.deltaY < 0 ? 0.9 : 1.1;
+      orbit.radius = Math.max(10, Math.min(1200, orbit.radius * zoomFactor));
+      orbit.update();
+    }, { passive: false });
 
-    // Timeline Canvas Click & Drag Selection
+    // Timeline Canvas Drag-to-Select & Hover
     el.altitudeCanvas.addEventListener('mousedown', (e) => {
       state.isSelectingTimeline = true;
       const rect = el.altitudeCanvas.getBoundingClientRect();
@@ -384,6 +571,42 @@
 
     window.addEventListener('mouseup', () => {
       state.isSelectingTimeline = false;
+    });
+
+    // Altitude Chart Hover Tooltip
+    el.altitudeCanvas.addEventListener('mousemove', (e) => {
+      if (state.isSelectingTimeline || !el.altitudeTooltip) return;
+      const rect = el.altitudeCanvas.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const ratio = Math.max(0, Math.min(1, mouseX / rect.width));
+      const tHover = ratio * state.maxT;
+
+      const session = state.sessionsData.find(s => s.id === state.focusedSessionId) || state.sessionsData[0];
+      if (!session) {
+        el.altitudeTooltip.style.display = 'none';
+        return;
+      }
+
+      const interp = interpolatePointAtTime(session, tHover);
+      if (!interp) {
+        el.altitudeTooltip.style.display = 'none';
+        return;
+      }
+
+      const min = Math.floor(tHover / 60);
+      const sec = Math.floor(tHover % 60);
+      el.altitudeTooltip.innerHTML = `
+        <strong>${min}m ${sec}s (${Math.round(tHover)}s)</strong> ·
+        ALT: ${Math.round(interp.alt).toLocaleString()}ft ·
+        <span style="color:${PHASE_COLORS[interp.phase] || '#fff'}; font-weight:700;">${interp.phase.toUpperCase()}</span>
+        ${interp.speed != null ? `· ${Math.round(interp.speed)} kts` : ''}
+      `;
+      el.altitudeTooltip.style.display = 'block';
+      el.altitudeTooltip.style.left = `${Math.min(rect.width - 230, Math.max(10, mouseX - 70))}px`;
+    });
+
+    el.altitudeCanvas.addEventListener('mouseleave', () => {
+      if (el.altitudeTooltip) el.altitudeTooltip.style.display = 'none';
     });
 
     // Modals
@@ -424,16 +647,21 @@
     });
   }
 
+  // Handle Resize
   function handleResize() {
-    const rRect = el.radarCanvas.parentElement.getBoundingClientRect();
-    el.radarCanvas.width = rRect.width * window.devicePixelRatio;
-    el.radarCanvas.height = rRect.height * window.devicePixelRatio;
+    const container = el.threeContainer;
+    if (renderer && camera && container) {
+      const width = container.clientWidth || 800;
+      const height = container.clientHeight || 500;
+      renderer.setSize(width, height);
+      camera.aspect = width / Math.max(1, height);
+      camera.updateProjectionMatrix();
+    }
 
     const aRect = el.altitudeCanvas.parentElement.getBoundingClientRect();
     el.altitudeCanvas.width = aRect.width * window.devicePixelRatio;
     el.altitudeCanvas.height = aRect.height * window.devicePixelRatio;
 
-    renderRadar();
     renderAltitudeChart();
   }
 
@@ -445,9 +673,7 @@
       opt.value = a.aircraft;
       const routesStr = a.routes.slice(0, 2).join(', ');
       opt.textContent = `${a.aircraft} · ${a.session_count} session${a.session_count > 1 ? 's' : ''} (${routesStr || 'local'})`;
-      if (a.aircraft === state.selectedAircraft) {
-        opt.selected = true;
-      }
+      if (a.aircraft === state.selectedAircraft) opt.selected = true;
       el.aircraftSelector.appendChild(opt);
     });
   }
@@ -463,7 +689,7 @@
       if (!resp.ok) throw new Error('Aircraft not found');
       state.aircraftDetails = await resp.json();
 
-      // Update meta card
+      // Meta card
       el.metaAcId.textContent = acId;
       el.metaAcSessions.textContent = `${state.aircraftDetails.session_count} sessions`;
       const allRoutes = new Set(state.aircraftDetails.sessions.map(s => `${s.src || '?' }->${s.dest || '?'}`));
@@ -473,19 +699,12 @@
       state.selectedSessionIds = new Set(state.aircraftDetails.sessions.map(s => s.id));
       state.focusedSessionId = state.aircraftDetails.sessions[0]?.id || null;
 
-      // Render Session Cards
       renderSessionCards();
-
-      // Populate Tag Target Session Dropdown
       populateTagSessionDropdown();
 
-      // Load Session Trajectories Batch
       await fetchSelectedSessionsBatch();
-
-      // Load manual tags
       await loadManualTags();
 
-      // Reset playback time to 0
       seekTime(0);
 
     } catch (err) {
@@ -494,14 +713,14 @@
     }
   }
 
-  // Render Sessions Selection List
+  // Render Session Cards
   function renderSessionCards() {
     el.sessionsContainer.innerHTML = '';
     if (!state.aircraftDetails) return;
 
     state.aircraftDetails.sessions.forEach(sess => {
       const card = document.createElement('div');
-      card.className = `session-card ${state.selectedSessionIds.has(sess.id) ? 'active' : ''}`;
+      card.className = `session-card ${state.selectedSessionIds.has(sess.id) ? 'active' : ''} ${sess.id === state.focusedSessionId ? 'focused' : ''}`;
       card.dataset.id = sess.id;
 
       const isChecked = state.selectedSessionIds.has(sess.id);
@@ -527,10 +746,9 @@
             <span style="color:${PHASE_COLORS[sess.dominant_phase] || '#fff'};">● ${sess.dominant_phase}</span>
           </div>
         </div>
-        <button class="session-focus-btn" title="Focus view & timeline on this session">Focus</button>
+        <button class="session-focus-btn" title="Focus 3D camera & timeline on this session">Focus</button>
       `;
 
-      // Checkbox handler
       const chk = card.querySelector('input[type="checkbox"]');
       chk.addEventListener('change', (e) => {
         e.stopPropagation();
@@ -544,20 +762,18 @@
         fetchSelectedSessionsBatch();
       });
 
-      // Card click
       card.addEventListener('click', (e) => {
         if (e.target.tagName === 'INPUT' || e.target.classList.contains('session-focus-btn')) return;
         chk.checked = !chk.checked;
         chk.dispatchEvent(new Event('change'));
       });
 
-      // Focus button handler
       card.querySelector('.session-focus-btn').addEventListener('click', (e) => {
         e.stopPropagation();
         state.focusedSessionId = sess.id;
         el.tagTargetSession.value = sess.id;
         updateTimelineAndRibbons();
-        renderRadar();
+        syncSessionFocusHighlight();
       });
 
       el.sessionsContainer.appendChild(card);
@@ -571,6 +787,12 @@
       card.classList.toggle('active', isSel);
       const chk = card.querySelector('input[type="checkbox"]');
       if (chk) chk.checked = isSel;
+    });
+  }
+
+  function syncSessionFocusHighlight() {
+    el.sessionsContainer.querySelectorAll('.session-card').forEach(card => {
+      card.classList.toggle('focused', card.dataset.id === state.focusedSessionId);
     });
   }
 
@@ -595,7 +817,7 @@
       state.maxT = 100;
       updateHeaderSummary();
       updateTimelineAndRibbons();
-      renderRadar();
+      rebuild3DScene();
       return;
     }
 
@@ -613,7 +835,7 @@
       state.bounds = data.bounds;
       state.airports = data.airports || [];
 
-      // Determine max time duration across selected sessions in real seconds
+      // Determine max time duration in seconds across selected sessions
       const durations = state.sessionsData.map(s => {
         if (s.duration_s != null && s.duration_s > 0) return s.duration_s;
         if (s.phase_samples && s.phase_samples.length > 0) {
@@ -624,7 +846,6 @@
       state.maxT = Math.max(60, ...durations);
       el.timeScrubber.max = state.maxT;
 
-      // Ensure focused session is in selected set
       if (!state.selectedSessionIds.has(state.focusedSessionId)) {
         state.focusedSessionId = sids[0];
         el.tagTargetSession.value = state.focusedSessionId;
@@ -632,7 +853,7 @@
 
       updateHeaderSummary();
       updateTimelineAndRibbons();
-      renderRadar();
+      rebuild3DScene();
       renderAltitudeChart();
     } catch (err) {
       console.error(err);
@@ -647,6 +868,342 @@
       el.selectionSummary.textContent = `Aircraft ${state.selectedAircraft} · All ${n} Sessions Active (Default)`;
     } else {
       el.selectionSummary.textContent = `Aircraft ${state.selectedAircraft} · ${n} of ${total} Sessions Selected`;
+    }
+  }
+
+  // Rebuild 3D Scene (Ground grid, radar rings, 3D trajectory lines, airport markers)
+  function rebuild3DScene() {
+    if (!scene) return;
+
+    // Clear existing dynamic objects
+    while (groundGroup.children.length > 0) {
+      groundGroup.remove(groundGroup.children[0]);
+    }
+    while (trajectoriesGroup.children.length > 0) {
+      trajectoriesGroup.remove(trajectoriesGroup.children[0]);
+    }
+    while (airportSpritesGroup.children.length > 0) {
+      airportSpritesGroup.remove(airportSpritesGroup.children[0]);
+    }
+    aircraftMeshes.clear();
+    while (aircraftGroup.children.length > 0) {
+      aircraftGroup.remove(aircraftGroup.children[0]);
+    }
+    trajectoryObjects = [];
+
+    if (!state.bounds || state.sessionsData.length === 0) return;
+
+    const b = state.bounds;
+    const midLon = (b.min_lon + b.max_lon) / 2;
+    const midLat = (b.min_lat + b.max_lat) / 2;
+
+    // 1. Ground Grid (Aesthetic: dark navy radar style)
+    const grid = new THREE.GridHelper(300, 30, 0x243650, 0x111c2e);
+    grid.position.y = 0;
+    groundGroup.add(grid);
+
+    // 2. Concentric Radar Range Rings on the ground around JFK
+    const jfkApt = state.airports.find(a => a.code === 'JFK') || { longitude: -73.7789, latitude: 40.6398 };
+    const jfkPos = worldTo3D(jfkApt.longitude, jfkApt.latitude, 0, midLon, midLat);
+
+    [10, 25, 50].forEach(nm => {
+      const radiusKm = nm * 1.852;
+      const segments = 64;
+      const ringGeom = new THREE.BufferGeometry();
+      const ringPts = [];
+
+      for (let i = 0; i <= segments; i++) {
+        const theta = (i / segments) * Math.PI * 2;
+        ringPts.push(
+          jfkPos.x + Math.sin(theta) * radiusKm,
+          0.05,
+          jfkPos.z + Math.cos(theta) * radiusKm
+        );
+      }
+      ringGeom.setAttribute('position', new THREE.Float32BufferAttribute(ringPts, 3));
+      const ringMat = new THREE.LineDashedMaterial({
+        color: 0x38bdf8,
+        dashSize: 3,
+        gapSize: 2,
+        transparent: true,
+        opacity: 0.35,
+      });
+      const ringLine = new THREE.Line(ringGeom, ringMat);
+      ringLine.computeLineDistances();
+      groundGroup.add(ringLine);
+
+      // Distance label sprite
+      const distSprite = createTextSprite(`${nm} NM (JFK)`, '#0d192a', '#38bdf8', '#233552');
+      distSprite.position.set(jfkPos.x + 4, 0.2, jfkPos.z - radiusKm);
+      distSprite.scale.set(8, 2, 1);
+      groundGroup.add(distSprite);
+    });
+
+    // 3. Airport Ground Markers and Labels
+    state.airports.forEach(apt => {
+      const aptPos = worldTo3D(apt.longitude, apt.latitude, 0, midLon, midLat);
+
+      // Glowing pad
+      const padGeom = new THREE.CylinderGeometry(1.2, 1.2, 0.3, 16);
+      const padMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8 });
+      const pad = new THREE.Mesh(padGeom, padMat);
+      pad.position.set(aptPos.x, 0.15, aptPos.z);
+      groundGroup.add(pad);
+
+      // Floating airport label badge
+      const aptSprite = createTextSprite(apt.code, '#0f172a', '#38bdf8', '#38bdf8');
+      aptSprite.position.set(aptPos.x, 3.5, aptPos.z);
+      aptSprite.scale.set(7, 2.2, 1);
+      airportSpritesGroup.add(aptSprite);
+    });
+
+    // 4. 3D Flight Trajectories
+    state.sessionsData.forEach((session, sIdx) => {
+      const isFocused = session.id === state.focusedSessionId;
+      const points = session.points || [];
+      const samples = session.phase_samples || [];
+      if (points.length < 2) return;
+
+      const sessionColor = new THREE.Color(SESSION_COLORS[sIdx % SESSION_COLORS.length]);
+
+      const positions = [];
+      const colors = [];
+      const groundPositions = [];
+
+      for (let i = 0; i < points.length; i++) {
+        const pt = points[i];
+        const v3 = worldTo3D(pt[0], pt[1], pt[2], midLon, midLat);
+
+        positions.push(v3.x, v3.y, v3.z);
+        groundPositions.push(v3.x, 0.05, v3.z);
+
+        if (state.colorMode === 'session') {
+          colors.push(sessionColor.r, sessionColor.g, sessionColor.b);
+        } else {
+          const ph = samples[i]?.phase || 'unknown';
+          const phColor = new THREE.Color(PHASE_COLORS[ph] || '#9aa9bd');
+          colors.push(phColor.r, phColor.g, phColor.b);
+        }
+      }
+
+      // 3D Path Line
+      const trajGeom = new THREE.BufferGeometry();
+      trajGeom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      trajGeom.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+
+      const trajMat = new THREE.LineBasicMaterial({
+        vertexColors: true,
+        transparent: true,
+        opacity: isFocused ? 1.0 : 0.45,
+        linewidth: isFocused ? 3 : 1.5,
+      });
+
+      const trajLine = new THREE.Line(trajGeom, trajMat);
+      trajLine.userData = { sessionId: session.id };
+      trajectoriesGroup.add(trajLine);
+      trajectoryObjects.push(trajLine);
+
+      // Ground Shadow Track (beneath the 3D path)
+      if (state.showGroundTrack) {
+        const shadowGeom = new THREE.BufferGeometry();
+        shadowGeom.setAttribute('position', new THREE.Float32BufferAttribute(groundPositions, 3));
+        const shadowMat = new THREE.LineBasicMaterial({
+          color: isFocused ? 0x38bdf8 : 0x1e293b,
+          transparent: true,
+          opacity: isFocused ? 0.4 : 0.2,
+          linewidth: 1,
+        });
+        const shadowLine = new THREE.Line(shadowGeom, shadowMat);
+        trajectoriesGroup.add(shadowLine);
+      }
+
+      // Manual Tag Highlights in 3D (Gold glow along tagged segments)
+      if (state.showTagsOverlay && session.manual_tags) {
+        session.manual_tags.forEach(t => {
+          const tagPositions = [];
+          for (let i = 0; i < samples.length; i++) {
+            const tSample = samples[i].time_s;
+            if (tSample >= t.t_start_s && tSample <= t.t_end_s) {
+              const pt = points[i];
+              const v3 = worldTo3D(pt[0], pt[1], pt[2], midLon, midLat);
+              tagPositions.push(v3.x, v3.y, v3.z);
+            }
+          }
+
+          if (tagPositions.length >= 6) {
+            const tagGeom = new THREE.BufferGeometry();
+            tagGeom.setAttribute('position', new THREE.Float32BufferAttribute(tagPositions, 3));
+            const tagMat = new THREE.LineBasicMaterial({
+              color: 0xfacc15,
+              linewidth: 5,
+              transparent: true,
+              opacity: 0.95,
+            });
+            const tagLine = new THREE.Line(tagGeom, tagMat);
+            trajectoriesGroup.add(tagLine);
+          }
+        });
+      }
+
+      // Create 3D Aircraft Model for this session
+      const acModel = create3DAircraftModel(isFocused ? 0xffffff : sessionColor.getHex());
+      aircraftGroup.add(acModel);
+
+      // Vertical altitude drop line from aircraft to ground
+      const dropGeom = new THREE.BufferGeometry();
+      dropGeom.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0], 3));
+      const dropMat = new THREE.LineDashedMaterial({
+        color: 0x38bdf8,
+        dashSize: 1,
+        gapSize: 0.5,
+        transparent: true,
+        opacity: isFocused ? 0.6 : 0.25,
+      });
+      const dropLine = new THREE.Line(dropGeom, dropMat);
+      aircraftGroup.add(dropLine);
+
+      // Floating aircraft HUD callout sprite
+      const calloutSprite = createTextSprite(`${session.aircraft}`, '#0f172a', '#ffffff', '#38bdf8');
+      calloutSprite.scale.set(10, 2.8, 1);
+      calloutSprite.visible = isFocused;
+      aircraftGroup.add(calloutSprite);
+
+      aircraftMeshes.set(session.id, {
+        mesh: acModel,
+        dropLine,
+        sprite: calloutSprite,
+        session,
+      });
+    });
+
+    // Update 3D Camera Focus position
+    const focusedSession = state.sessionsData.find(s => s.id === state.focusedSessionId) || state.sessionsData[0];
+    if (focusedSession && focusedSession.points.length > 0) {
+      const midIdx = Math.floor(focusedSession.points.length / 2);
+      const midPt = focusedSession.points[midIdx];
+      const targetPos = worldTo3D(midPt[0], midPt[1], 0, midLon, midLat);
+      orbit.target.set(targetPos.x, 0, targetPos.z);
+      orbit.update();
+    }
+  }
+
+  // Create 3D Stylized Aircraft Model
+  function create3DAircraftModel(colorHex) {
+    const group = new THREE.Group();
+
+    // Fuselage
+    const fuseGeom = new THREE.CylinderGeometry(0.35, 0.45, 3.8, 8);
+    fuseGeom.rotateZ(Math.PI / 2);
+    const fuseMat = new THREE.MeshStandardMaterial({
+      color: colorHex,
+      roughness: 0.4,
+      metalness: 0.6,
+    });
+    const fuse = new THREE.Mesh(fuseGeom, fuseMat);
+    group.add(fuse);
+
+    // Nose Cone
+    const noseGeom = new THREE.ConeGeometry(0.38, 1.1, 8);
+    noseGeom.rotateZ(-Math.PI / 2);
+    const noseMat = new THREE.MeshStandardMaterial({ color: 0x38bdf8 });
+    const nose = new THREE.Mesh(noseGeom, noseMat);
+    nose.position.x = 2.4;
+    group.add(nose);
+
+    // Main Wings (swept back)
+    const wingGeom = new THREE.BoxGeometry(1.2, 0.08, 4.2);
+    const wingMat = new THREE.MeshStandardMaterial({ color: colorHex, roughness: 0.4 });
+    const wing = new THREE.Mesh(wingGeom, wingMat);
+    wing.position.set(0.2, 0.0, 0);
+    group.add(wing);
+
+    // Tail Fin
+    const tailGeom = new THREE.BoxGeometry(0.8, 1.1, 0.08);
+    const tailMat = new THREE.MeshStandardMaterial({ color: 0x38bdf8 });
+    const tail = new THREE.Mesh(tailGeom, tailMat);
+    tail.position.set(-1.4, 0.6, 0);
+    group.add(tail);
+
+    group.scale.set(1.4, 1.4, 1.4);
+    return group;
+  }
+
+  // Helper: Create Text Sprite Badge
+  function createTextSprite(text, bgColor = '#0f172a', textColor = '#ffffff', borderColor = '#38bdf8') {
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+
+    // Rounded card background
+    ctx.fillStyle = bgColor;
+    ctx.strokeStyle = borderColor;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.roundRect(4, 4, 248, 56, 10);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = textColor;
+    ctx.font = 'bold 24px JetBrains Mono, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, 128, 32);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.minFilter = THREE.LinearFilter;
+    const mat = new THREE.SpriteMaterial({ map: texture, depthTest: false });
+    const sprite = new THREE.Sprite(mat);
+    sprite.renderOrder = 999;
+    return sprite;
+  }
+
+  // Handle Click on 3D Trajectory (Raycasting)
+  function handle3DClick(event) {
+    if (!camera || trajectoryObjects.length === 0) return;
+
+    const rect = renderer.domElement.getBoundingClientRect();
+    const mouse = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1
+    );
+
+    const raycaster = new THREE.Raycaster();
+    raycaster.params.Line = { threshold: 4.0 };
+    raycaster.setFromCamera(mouse, camera);
+
+    const intersects = raycaster.intersectObjects(trajectoryObjects);
+    if (intersects.length > 0) {
+      const hit = intersects[0];
+      const sid = hit.object.userData.sessionId;
+      if (sid) {
+        state.focusedSessionId = sid;
+        el.tagTargetSession.value = sid;
+
+        const session = state.sessionsData.find(s => s.id === sid);
+        if (session && hit.point) {
+          // Find closest point in trajectory to hit.point
+          const b = state.bounds;
+          const midLon = (b.min_lon + b.max_lon) / 2;
+          const midLat = (b.min_lat + b.max_lat) / 2;
+          let nearestTime = 0;
+          let minDSq = Infinity;
+
+          session.points.forEach((pt, idx) => {
+            const v3 = worldTo3D(pt[0], pt[1], pt[2], midLon, midLat);
+            const dSq = v3.distanceToSquared(hit.point);
+            if (dSq < minDSq) {
+              minDSq = dSq;
+              nearestTime = session.phase_samples[idx]?.time_s || 0;
+            }
+          });
+          seekTime(nearestTime);
+        }
+
+        updateTimelineAndRibbons();
+        syncSessionFocusHighlight();
+        rebuild3DScene();
+      }
     }
   }
 
@@ -665,7 +1222,7 @@
     updateTimeDisplay();
     updateTimelineScrubberLine();
     updateHUD();
-    renderRadar();
+    update3DAircraftPositions();
   }
 
   function animationLoop(timestamp) {
@@ -688,12 +1245,76 @@
       updateTimeDisplay();
       updateTimelineScrubberLine();
       updateHUD();
-      renderRadar();
     } else {
       state.lastFrameTime = timestamp;
     }
 
+    update3DAircraftPositions();
+
+    if (renderer && scene && camera) {
+      renderer.render(scene, camera);
+    }
+
     requestAnimationFrame(animationLoop);
+  }
+
+  // Update 3D Aircraft Positions, Orientations, and Altitude Drop Lines
+  function update3DAircraftPositions() {
+    if (!state.bounds || state.sessionsData.length === 0) return;
+
+    const b = state.bounds;
+    const midLon = (b.min_lon + b.max_lon) / 2;
+    const midLat = (b.min_lat + b.max_lat) / 2;
+
+    aircraftMeshes.forEach(({ mesh, dropLine, sprite, session }, sid) => {
+      const isFocused = sid === state.focusedSessionId;
+      const interp = interpolatePointAtTime(session, state.t);
+      if (!interp) return;
+
+      const pos = worldTo3D(interp.lon, interp.lat, interp.alt, midLon, midLat);
+      mesh.position.copy(pos);
+
+      // Orientation in 3D: orient along flight direction vector
+      if (interp.nextPos) {
+        const next3D = worldTo3D(interp.nextPos[0], interp.nextPos[1], interp.nextPos[2], midLon, midLat);
+        const dir = new THREE.Vector3().subVectors(next3D, pos).normalize();
+        if (dir.lengthSq() > 0.001) {
+          // Align fuselage (+X) along travel direction
+          const targetRot = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(1, 0, 0), dir);
+          mesh.quaternion.slerp(targetRot, 0.4);
+        }
+      } else {
+        mesh.rotation.y = -(interp.heading * Math.PI) / 180;
+      }
+
+      // Check if session has concluded
+      const isCompleted = state.t >= (session.duration_s || session.t_max || 0);
+      mesh.traverse(child => {
+        if (child.isMesh && child.material) {
+          child.material.opacity = isCompleted ? 0.35 : (isFocused ? 1.0 : 0.65);
+          child.material.transparent = true;
+        }
+      });
+
+      // Update vertical drop line to ground
+      const dropGeom = dropLine.geometry;
+      const dropPositions = [pos.x, pos.y, pos.z, pos.x, 0.05, pos.z];
+      dropGeom.setAttribute('position', new THREE.Float32BufferAttribute(dropPositions, 3));
+      dropLine.computeLineDistances();
+      dropLine.visible = !isCompleted;
+
+      // Update floating callout sprite badge
+      if (sprite) {
+        sprite.visible = isFocused;
+        sprite.position.set(pos.x, pos.y + 4.5, pos.z);
+      }
+
+      // Follow focused aircraft if active
+      if (isFocused && state.followAircraft) {
+        orbit.target.lerp(new THREE.Vector3(pos.x, 0, pos.z), 0.1);
+        orbit.update();
+      }
+    });
   }
 
   function updateTimeDisplay() {
@@ -750,7 +1371,7 @@
     el.hudPredPhase.style.background = PHASE_COLORS[interp.phase] || '#253856';
     el.hudPredPhase.style.color = '#fff';
 
-    // Check if manual tag applies to this moment
+    // Manual tag badge
     const manualTag = state.manualTags.find(t =>
       t.session_id === focusedSession.id && state.t >= t.t_start_s && state.t <= t.t_end_s
     );
@@ -774,12 +1395,14 @@
     if (t <= (samples[0]?.time_s || 0)) {
       const p = points[0];
       const s = samples[0] || {};
+      const nextP = points[1] || p;
       return {
         lon: p[0], lat: p[1], alt: p[2],
         phase: s.phase || 'unknown',
         speed: s.ground_speed,
         vs: s.flight_phase_vertical_rate_fpm,
         heading: 0,
+        nextPos: nextP,
       };
     }
 
@@ -796,7 +1419,6 @@
         const lat = p0[1] + (p1[1] - p0[1]) * factor;
         const alt = p0[2] + (p1[2] - p0[2]) * factor;
 
-        // Heading in degrees
         const dLon = p1[0] - p0[0];
         const dLat = p1[1] - p0[1];
         const heading = (Math.atan2(dLon, dLat) * 180 / Math.PI + 360) % 360;
@@ -807,6 +1429,7 @@
           speed: samples[i].ground_speed,
           vs: samples[i].flight_phase_vertical_rate_fpm,
           heading,
+          nextPos: p1,
         };
       }
     }
@@ -824,195 +1447,8 @@
       speed: lastS.ground_speed,
       vs: lastS.flight_phase_vertical_rate_fpm,
       heading: finalHeading,
+      nextPos: null,
     };
-  }
-
-  // 2D Radar Canvas Map Rendering
-  function renderRadar() {
-    const width = el.radarCanvas.width;
-    const height = el.radarCanvas.height;
-    if (width === 0 || height === 0) return;
-
-    radarCtx.clearRect(0, 0, width, height);
-
-    // Background grid & radar rings
-    radarCtx.fillStyle = '#070c17';
-    radarCtx.fillRect(0, 0, width, height);
-
-    if (!state.bounds) {
-      radarCtx.fillStyle = '#64748b';
-      radarCtx.font = '14px Inter';
-      radarCtx.textAlign = 'center';
-      radarCtx.fillText('Select an aircraft to visualize radar flight paths', width / 2, height / 2);
-      return;
-    }
-
-    // World to Screen Projection
-    const b = state.bounds;
-    const midLon = (b.min_lon + b.max_lon) / 2;
-    const midLat = (b.min_lat + b.max_lat) / 2;
-    const spanLon = Math.max(0.2, b.max_lon - b.min_lon);
-    const spanLat = Math.max(0.2, b.max_lat - b.min_lat);
-
-    // Keep aspect ratio
-    const scale = Math.min(width / spanLon, height / spanLat) * 0.85 * state.mapZoom;
-
-    function project(lon, lat) {
-      const x = width / 2 + (lon - midLon) * scale + state.mapPan.x;
-      const y = height / 2 - (lat - midLat) * scale * 1.35 + state.mapPan.y;
-      return [x, y];
-    }
-
-    // Draw Radar Range Rings around JFK
-    const jfk = state.airports.find(a => a.code === 'JFK') || { longitude: -73.7789, latitude: 40.6398 };
-    const [jfkX, jfkY] = project(jfk.longitude, jfk.latitude);
-
-    radarCtx.strokeStyle = 'rgba(56, 189, 248, 0.12)';
-    radarCtx.lineWidth = 1;
-    radarCtx.setLineDash([4, 4]);
-
-    [10, 25, 50].forEach(nm => {
-      const r = (nm / 60) * scale * 1.15;
-      radarCtx.beginPath();
-      radarCtx.arc(jfkX, jfkY, r, 0, Math.PI * 2);
-      radarCtx.stroke();
-
-      radarCtx.fillStyle = 'rgba(56, 189, 248, 0.4)';
-      radarCtx.font = '9px JetBrains Mono';
-      radarCtx.textAlign = 'left';
-      radarCtx.fillText(`${nm} NM (JFK)`, jfkX + 4, jfkY - r + 10);
-    });
-
-    radarCtx.setLineDash([]);
-
-    // Draw Flight Paths for all selected sessions
-    state.sessionsData.forEach((session, sIdx) => {
-      const isFocused = session.id === state.focusedSessionId;
-      const points = session.points;
-      const samples = session.phase_samples || [];
-      if (!points || points.length < 2) return;
-
-      const sessionColor = SESSION_COLORS[sIdx % SESSION_COLORS.length];
-
-      // Draw trajectory segments
-      radarCtx.lineCap = 'round';
-      radarCtx.lineJoin = 'round';
-
-      for (let i = 0; i < points.length - 1; i++) {
-        const [x0, y0] = project(points[i][0], points[i][1]);
-        const [x1, y1] = project(points[i + 1][0], points[i + 1][1]);
-
-        radarCtx.beginPath();
-        radarCtx.moveTo(x0, y0);
-        radarCtx.lineTo(x1, y1);
-
-        if (state.colorMode === 'session') {
-          radarCtx.strokeStyle = isFocused ? sessionColor : 'rgba(100, 116, 139, 0.45)';
-          radarCtx.lineWidth = isFocused ? 3 : 1.5;
-        } else {
-          // Color by predicted flight phase
-          const ph = samples[i]?.phase || 'unknown';
-          const baseColor = PHASE_COLORS[ph] || '#9aa9bd';
-          radarCtx.strokeStyle = isFocused ? baseColor : 'rgba(148, 163, 184, 0.4)';
-          radarCtx.lineWidth = isFocused ? 3.5 : 1.8;
-        }
-
-        radarCtx.stroke();
-      }
-
-      // Draw manual tag overlay brackets if enabled
-      if (state.showTagsOverlay && session.manual_tags) {
-        session.manual_tags.forEach(t => {
-          radarCtx.strokeStyle = '#facc15';
-          radarCtx.lineWidth = 5;
-          radarCtx.setLineDash([3, 3]);
-
-          for (let i = 0; i < samples.length - 1; i++) {
-            const tSample = samples[i].time_s;
-            if (tSample >= t.t_start_s && tSample <= t.t_end_s) {
-              const [x0, y0] = project(points[i][0], points[i][1]);
-              const [x1, y1] = project(points[i + 1][0], points[i + 1][1]);
-              radarCtx.beginPath();
-              radarCtx.moveTo(x0, y0);
-              radarCtx.lineTo(x1, y1);
-              radarCtx.stroke();
-            }
-          }
-          radarCtx.setLineDash([]);
-        });
-      }
-    });
-
-    // Draw Airports
-    if (state.showAirports) {
-      state.airports.forEach(apt => {
-        const [ax, ay] = project(apt.longitude, apt.latitude);
-        radarCtx.fillStyle = '#38bdf8';
-        radarCtx.fillRect(ax - 3, ay - 3, 6, 6);
-
-        radarCtx.fillStyle = '#e2e8f0';
-        radarCtx.font = 'bold 10px JetBrains Mono';
-        radarCtx.textAlign = 'center';
-        radarCtx.fillText(apt.code, ax, ay - 6);
-      });
-    }
-
-    // Draw Active Aircraft Positions
-    state.sessionsData.forEach((session, sIdx) => {
-      const isFocused = session.id === state.focusedSessionId;
-      const interp = interpolatePointAtTime(session, state.t);
-      if (!interp) return;
-
-      const [acX, acY] = project(interp.lon, interp.lat);
-
-      // Follow focused aircraft if toggle is active
-      if (isFocused && state.followAircraft) {
-        state.mapPan.x = width / 2 - (interp.lon - midLon) * scale;
-        state.mapPan.y = height / 2 + (interp.lat - midLat) * scale * 1.35;
-      }
-
-      // Aircraft symbol (triangle oriented by heading)
-      radarCtx.save();
-      radarCtx.translate(acX, acY);
-      radarCtx.rotate((interp.heading * Math.PI) / 180);
-
-      const symbolColor = isFocused ? '#fff' : SESSION_COLORS[sIdx % SESSION_COLORS.length];
-      radarCtx.fillStyle = symbolColor;
-      radarCtx.beginPath();
-      radarCtx.moveTo(0, -9);
-      radarCtx.lineTo(6, 7);
-      radarCtx.lineTo(0, 4);
-      radarCtx.lineTo(-6, 7);
-      radarCtx.closePath();
-      radarCtx.fill();
-
-      // Outer glow for focused aircraft
-      if (isFocused) {
-        radarCtx.strokeStyle = '#38bdf8';
-        radarCtx.lineWidth = 2;
-        radarCtx.stroke();
-      }
-
-      radarCtx.restore();
-
-      // Callout tag next to aircraft
-      if (isFocused) {
-        radarCtx.fillStyle = 'rgba(15, 23, 42, 0.9)';
-        radarCtx.strokeStyle = '#38bdf8';
-        radarCtx.lineWidth = 1;
-        radarCtx.strokeRect(acX + 12, acY - 14, 110, 26);
-        radarCtx.fillRect(acX + 12, acY - 14, 110, 26);
-
-        radarCtx.fillStyle = '#fff';
-        radarCtx.font = 'bold 9.5px JetBrains Mono';
-        radarCtx.textAlign = 'left';
-        radarCtx.fillText(`${session.aircraft} (${session.id})`, acX + 16, acY - 2);
-
-        radarCtx.fillStyle = PHASE_COLORS[interp.phase] || '#38bdf8';
-        radarCtx.font = '9px JetBrains Mono';
-        radarCtx.fillText(`${Math.round(interp.alt)}ft · ${interp.phase}`, acX + 16, acY + 9);
-      }
-    });
   }
 
   // Render Synchronized Timeline Ribbons & Altitude Chart
@@ -1035,7 +1471,7 @@
       const s = int.start_sample_s;
       const e = int.end_sample_s;
       const leftRatio = (s / state.maxT) * 100;
-      const widthRatio = Math.max(0.5, ((e - s) / state.maxT) * 100);
+      const widthRatio = Math.max(0.4, ((e - s) / state.maxT) * 100);
 
       const seg = document.createElement('div');
       seg.className = 'ribbon-seg';
@@ -1058,7 +1494,7 @@
     const tags = state.manualTags.filter(t => t.session_id === session.id);
     tags.forEach(t => {
       const leftRatio = (t.t_start_s / state.maxT) * 100;
-      const widthRatio = Math.max(0.5, ((t.t_end_s - t.t_start_s) / state.maxT) * 100);
+      const widthRatio = Math.max(0.4, ((t.t_end_s - t.t_start_s) / state.maxT) * 100);
 
       const seg = document.createElement('div');
       seg.className = 'ribbon-seg';
@@ -1092,12 +1528,11 @@
     const points = session.points;
     const samples = session.phase_samples || [];
 
-    // Altitude range
     let minAlt = 0;
     let maxAlt = Math.max(1000, ...points.map(p => p[2]));
     maxAlt = Math.ceil(maxAlt / 5000) * 5000;
 
-    // Draw horizontal altitude grid lines
+    // Grid lines
     altCtx.strokeStyle = 'rgba(35, 53, 82, 0.6)';
     altCtx.lineWidth = 1;
 
@@ -1137,7 +1572,7 @@
     altCtx.fillStyle = gradient;
     altCtx.fill();
 
-    // Draw segment colored altitude stroke
+    // Colored stroke along altitude curve
     altCtx.lineWidth = 2.5;
     for (let i = 0; i < points.length - 1; i++) {
       const t0 = samples[i]?.time_s || 0;
@@ -1169,7 +1604,7 @@
         state.manualTags = await resp.json();
         renderTagsList();
         updateTimelineAndRibbons();
-        renderRadar();
+        rebuild3DScene();
       }
     } catch (err) {
       console.error(err);
@@ -1208,6 +1643,7 @@
         el.tagTargetSession.value = tag.session_id;
         seekTime(tag.t_start_s);
         updateTimelineAndRibbons();
+        syncSessionFocusHighlight();
       });
 
       item.querySelector('.btn-tag-del').addEventListener('click', async () => {
@@ -1252,7 +1688,6 @@
       if (!resp.ok) throw new Error('Failed to save manual tag');
       await loadManualTags();
 
-      // Clear notes & show brief success state
       el.btnApplyTag.innerHTML = '<span class="icon">✓</span> Saved!';
       setTimeout(() => {
         el.btnApplyTag.innerHTML = '<span class="icon">🏷️</span> Save Manual Tag';
@@ -1301,15 +1736,11 @@
       el.evalTotalTags.textContent = data.total_tags;
       el.evalTotalDisagreements.textContent = data.mismatching_points;
 
-      // Suggestions
       el.evalSuggestionsBox.innerHTML = data.refinement_suggestions
         .map(s => `<p style="margin-bottom:6px;">🔹 ${s}</p>`)
         .join('');
 
-      // Confusion matrix
       renderConfusionMatrix(data.confusion_matrix);
-
-      // Disagreements
       renderDisagreementsTable(data.disagreements);
     } catch (err) {
       el.evalSuggestionsBox.textContent = 'Error computing evaluation: ' + err.message;
@@ -1336,7 +1767,6 @@
     });
     const predPhases = Array.from(predPhasesSet);
 
-    // Header row
     const thead = document.createElement('thead');
     const hRow = document.createElement('tr');
     hRow.innerHTML = '<th>Manual Ground Truth ↓ / Predicted →</th>';
@@ -1346,7 +1776,6 @@
     thead.appendChild(hRow);
     table.appendChild(thead);
 
-    // Body rows
     const tbody = document.createElement('tbody');
     manualPhases.forEach(m => {
       const row = document.createElement('tr');
@@ -1391,4 +1820,3 @@
   // Start app on DOMContentLoaded
   document.addEventListener('DOMContentLoaded', init);
 })();
-
