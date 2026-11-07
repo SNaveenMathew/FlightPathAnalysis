@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Flight Phase Explorer & Manual Tagging Studio</title>
-  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/styles.css?v=aircraft-list-scroll">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -42,6 +42,20 @@
       </div>
     </header>
 
+    <!-- Filter Bar -->
+    <div id="filters" aria-label="Trajectory filters">
+      <label><input type="checkbox" data-kind="transit" checked> Pass through</label>
+      <label><input type="checkbox" data-kind="departure" checked> Takeoff and exit</label>
+      <label><input type="checkbox" data-kind="arrival" checked> Enter and land</label>
+      <label><input type="checkbox" data-kind="local" checked> Takeoff and land</label>
+      <label>Origin (takeoff) <select id="source-airport">
+        <option value="*">All origins</option>
+      </select></label>
+      <label>Destination (landing) <select id="destination-airport">
+        <option value="*">All destinations</option>
+      </select></label>
+    </div>
+
     <!-- Main Workspace -->
     <div id="main-layout">
       <!-- Left Sidebar: Selection & Tagging -->
@@ -55,18 +69,14 @@
           <div class="input-group">
             <input type="text" id="ac-search-input" placeholder="Search hex ID or route (e.g. a387f0)..." autocomplete="off">
           </div>
-          <div class="select-wrapper">
-            <select id="aircraft-selector" size="6" aria-label="Aircraft list">
-              <!-- Populated dynamically -->
-            </select>
-          </div>
+          <div id="aircraft-container" class="aircraft-list" role="group" aria-label="Select aircraft"></div>
           <div id="ac-meta-card" class="info-card">
             <div class="info-row">
-              <span class="label">Aircraft ID:</span>
+              <span class="label">Selection:</span>
               <span class="value mono" id="meta-ac-id">-</span>
             </div>
             <div class="info-row">
-              <span class="label">Total Sessions:</span>
+              <span class="label">Available sessions:</span>
               <span class="value" id="meta-ac-sessions">-</span>
             </div>
             <div class="info-row">
@@ -82,12 +92,12 @@
             <span class="step-num">2</span>
             <h2>Select Sessions</h2>
             <div class="selection-toggles">
-              <button id="btn-select-all-sessions" class="btn-micro" title="Select all sessions of this aircraft">All (Default)</button>
+              <button id="btn-select-all-sessions" class="btn-micro" title="Select all sessions for selected aircraft">All</button>
               <button id="btn-select-none-sessions" class="btn-micro" title="Clear selection">Clear</button>
             </div>
           </div>
           <div class="session-default-hint">
-            Defaults to all sessions when aircraft is selected. Toggle individual sessions below:
+            Select one or more aircraft, then choose which of their sessions to animate:
           </div>
           <div id="sessions-container" class="sessions-list">
             <!-- Session cards populated dynamically -->
@@ -414,4 +424,3 @@
   <script src="/static/app.js"></script>
 </body>
 </html>
-

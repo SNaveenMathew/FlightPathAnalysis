@@ -132,15 +132,20 @@ html, body {
 #sidebar {
   width: 380px;
   flex: none;
+  height: 100%;
   background: var(--bg-secondary);
   border-right: 1px solid var(--border-color);
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   min-height: 0;
 }
 
 .sidebar-section {
+  flex: 0 0 auto;
   padding: 12px 14px;
   border-bottom: 1px solid var(--border-color);
 }
@@ -195,27 +200,22 @@ html, body {
   margin-top: 6px;
 }
 
-#aircraft-selector {
-  width: 100%;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  color: var(--text-main);
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  padding: 4px;
-  outline: none;
+.aircraft-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  height: 220px;
+  max-height: 30vh;
+  min-height: 0;
+  flex: 0 1 220px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  margin-top: 6px;
 }
 
-#aircraft-selector option {
-  padding: 4px 6px;
-  border-radius: 4px;
-  margin-bottom: 2px;
-}
-
-#aircraft-selector option:checked {
-  background: var(--border-focus);
-  color: #fff;
+.aircraft-list > .aircraft-card {
+  flex: 0 0 auto;
 }
 
 .info-card {
@@ -1125,4 +1125,3 @@ kbd {
   line-height: 1.6;
   font-size: 12px;
 }
-

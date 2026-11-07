@@ -32,13 +32,18 @@
   const state = {
     aircraftList: [],
     selectedAircraft: null,
-    aircraftDetails: null,
+    selectedAircraftIds: new Set(),
     selectedSessionIds: new Set(),
     focusedSessionId: null,
     sessionsData: [],
+    allSessionsData: [],
+    visible: [],
     bounds: null,
+    allBounds: null,
     airports: [],
+    allAirports: [],
     manualTags: [],
+    manualTagLoadVersion: 0,
     activeTagPhase: 'approach',
 
     // Playback
@@ -68,7 +73,7 @@
   const el = {
     selectionSummary: document.getElementById('selection-summary'),
     acSearchInput: document.getElementById('ac-search-input'),
-    aircraftSelector: document.getElementById('aircraft-selector'),
+    aircraftContainer: document.getElementById('aircraft-container'),
     metaAcId: document.getElementById('meta-ac-id'),
     metaAcSessions: document.getElementById('meta-ac-sessions'),
     metaAcRoutes: document.getElementById('meta-ac-routes'),
@@ -241,11 +246,39 @@
       if (!resp.ok) throw new Error('Failed to fetch aircraft list');
       state.aircraftList = await resp.json();
 
-      renderAircraftList(state.aircraftList);
+      const sessionIds = state.aircraftList.flatMap((aircraft) => aircraft.session_ids || []);
+      if (sessionIds.length === 0) throw new Error('No sessions are available');
 
-      // Auto-select first aircraft
-      if (state.aircraftList.length > 0) {
-        selectAircraft(state.aircraftList[0].aircraft);
+      const sessionsResp = await fetch('/api/sessions/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_ids: sessionIds }),
+      });
+      if (!sessionsResp.ok) throw new Error('Failed to fetch all sessions');
+
+      const allData = await sessionsResp.json();
+      state.allSessionsData = allData.sessions;
+      state.allBounds = allData.bounds;
+      state.allAirports = allData.airports || [];
+      populateAirportFilter(document.getElementById('source-airport'), 'src', 'Origin');
+      populateAirportFilter(document.getElementById('destination-airport'), 'dest', 'Destination');
+      regroup();
+
+      const firstAircraft = state.aircraftList[0]?.aircraft;
+      if (firstAircraft) {
+        state.selectedAircraftIds = new Set([firstAircraft]);
+        state.selectedAircraft = firstAircraft;
+        state.selectedSessionIds = new Set(
+          state.allSessionsData
+            .filter((session) => session.aircraft === firstAircraft)
+            .map((session) => session.id),
+        );
+        renderAircraftList(state.aircraftList);
+        renderSessionCards();
+        updateAircraftSummary();
+        regroup();
+        updateSelectedSessions();
+        await loadManualTags();
       }
     } catch (err) {
       console.error(err);
@@ -298,36 +331,33 @@
 
   // Setup Event Listeners
   function setupEventListeners() {
+    document.querySelectorAll(
+      '#filters input[data-kind], #source-airport, #destination-airport',
+    ).forEach((control) => control.addEventListener('change', regroup));
+
     // Aircraft search
     el.acSearchInput.addEventListener('input', (e) => {
-      const q = e.target.value.toLowerCase().trim();
-      const filtered = state.aircraftList.filter(
-        a => a.aircraft.toLowerCase().includes(q) || a.routes.some(r => r.toLowerCase().includes(q))
-      );
-      renderAircraftList(filtered);
-    });
-
-    // Aircraft selector change
-    el.aircraftSelector.addEventListener('change', (e) => {
-      if (e.target.value) {
-        selectAircraft(e.target.value);
-      }
+      renderAircraftList(getFilteredAircraftList());
     });
 
     // Sessions Selection buttons
     el.btnSelectAllSessions.addEventListener('click', () => {
-      if (!state.aircraftDetails) return;
-      state.selectedSessionIds = new Set(state.aircraftDetails.sessions.map(s => s.id));
+      state.selectedSessionIds = new Set(
+        state.allSessionsData
+          .filter((session) => state.selectedAircraftIds.has(session.aircraft))
+          .map((session) => session.id),
+      );
       syncSessionCheckboxes();
-      fetchSelectedSessionsBatch();
+      regroup();
+      updateSelectedSessions();
     });
 
     el.btnSelectNoneSessions.addEventListener('click', () => {
       state.selectedSessionIds.clear();
       syncSessionCheckboxes();
-      state.sessionsData = [];
-      updateTimelineAndRibbons();
-      rebuild3DScene();
+      state.focusedSessionId = null;
+      regroup();
+      updateSelectedSessions();
     });
 
     // 2D Planar vs 3D Orbit View Toggles
@@ -455,9 +485,8 @@
 
     // Target session dropdown
     el.tagTargetSession.addEventListener('change', (e) => {
-      state.focusedSessionId = e.target.value;
-      updateTimelineAndRibbons();
-      syncSessionFocusHighlight();
+      const session = state.allSessionsData.find((candidate) => candidate.id === e.target.value);
+      if (session) focusSession(session);
     });
 
     // 3D Mouse & Orbit Interaction (Rotate, Pan, Zoom, Click)
@@ -665,60 +694,116 @@
     renderAltitudeChart();
   }
 
-  // Render Aircraft List Dropdown
+  // Render searchable aircraft multi-select
   function renderAircraftList(list) {
-    el.aircraftSelector.innerHTML = '';
+    el.aircraftContainer.innerHTML = '';
     list.forEach(a => {
-      const opt = document.createElement('option');
-      opt.value = a.aircraft;
-      const routesStr = a.routes.slice(0, 2).join(', ');
-      opt.textContent = `${a.aircraft} · ${a.session_count} session${a.session_count > 1 ? 's' : ''} (${routesStr || 'local'})`;
-      if (a.aircraft === state.selectedAircraft) opt.selected = true;
-      el.aircraftSelector.appendChild(opt);
+      const card = document.createElement('div');
+      const isSelected = state.selectedAircraftIds.has(a.aircraft);
+      card.className = `session-card aircraft-card ${isSelected ? 'active' : ''}`;
+      card.dataset.aircraft = a.aircraft;
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = isSelected;
+      checkbox.setAttribute('aria-label', `Select aircraft ${a.aircraft}`);
+
+      const info = document.createElement('div');
+      info.className = 'session-info';
+      const title = document.createElement('div');
+      title.className = 'session-title-row';
+      const aircraftId = document.createElement('span');
+      aircraftId.className = 'session-id';
+      aircraftId.textContent = a.aircraft;
+      const sessionCount = document.createElement('span');
+      sessionCount.className = 'badge-kind';
+      sessionCount.textContent = `${a.session_count} session${a.session_count === 1 ? '' : 's'}`;
+      title.append(aircraftId, sessionCount);
+
+      const routes = document.createElement('div');
+      routes.className = 'session-sub-row';
+      routes.textContent = a.routes.slice(0, 2).join(', ') || 'Routes unavailable';
+      info.append(title, routes);
+      card.append(checkbox, info);
+
+      checkbox.addEventListener('change', (event) => {
+        event.stopPropagation();
+        toggleAircraftSelection(a.aircraft, checkbox.checked);
+      });
+      card.addEventListener('click', (event) => {
+        if (event.target.tagName === 'INPUT') return;
+        checkbox.checked = !checkbox.checked;
+        toggleAircraftSelection(a.aircraft, checkbox.checked);
+      });
+      el.aircraftContainer.appendChild(card);
     });
   }
 
-  // Aircraft Selection Flow
-  async function selectAircraft(acId) {
-    if (!acId) return;
-    state.selectedAircraft = acId;
+  function toggleAircraftSelection(aircraftId, selected) {
+    const aircraftSessionIds = state.allSessionsData
+      .filter((session) => session.aircraft === aircraftId)
+      .map((session) => session.id);
 
-    try {
-      el.selectionSummary.textContent = `Loading aircraft ${acId}...`;
-      const resp = await fetch(`/api/aircraft/${acId}`);
-      if (!resp.ok) throw new Error('Aircraft not found');
-      state.aircraftDetails = await resp.json();
-
-      // Meta card
-      el.metaAcId.textContent = acId;
-      el.metaAcSessions.textContent = `${state.aircraftDetails.session_count} sessions`;
-      const allRoutes = new Set(state.aircraftDetails.sessions.map(s => `${s.src || '?' }->${s.dest || '?'}`));
-      el.metaAcRoutes.textContent = Array.from(allRoutes).slice(0, 3).join(', ');
-
-      // RULE REQUIREMENT: Defaults to ALL sessions when only the aircraft is selected!
-      state.selectedSessionIds = new Set(state.aircraftDetails.sessions.map(s => s.id));
-      state.focusedSessionId = state.aircraftDetails.sessions[0]?.id || null;
-
-      renderSessionCards();
-      populateTagSessionDropdown();
-
-      await fetchSelectedSessionsBatch();
-      await loadManualTags();
-
-      seekTime(0);
-
-    } catch (err) {
-      console.error(err);
-      el.selectionSummary.textContent = `Error loading aircraft ${acId}`;
+    if (selected) {
+      state.selectedAircraftIds.add(aircraftId);
+      aircraftSessionIds.forEach((sessionId) => state.selectedSessionIds.add(sessionId));
+      state.selectedAircraft = aircraftId;
+    } else {
+      state.selectedAircraftIds.delete(aircraftId);
+      aircraftSessionIds.forEach((sessionId) => state.selectedSessionIds.delete(sessionId));
+      if (state.selectedAircraft === aircraftId) {
+        state.selectedAircraft = state.selectedAircraftIds.values().next().value || null;
+      }
     }
+
+    if (!state.selectedSessionIds.has(state.focusedSessionId)) {
+      state.focusedSessionId = state.selectedSessionIds.values().next().value || null;
+    }
+    const aircraftCard = [...el.aircraftContainer.children]
+      .find((card) => card.dataset.aircraft === aircraftId);
+    if (aircraftCard) {
+      aircraftCard.classList.toggle('active', selected);
+      aircraftCard.querySelector('input[type="checkbox"]').checked = selected;
+    }
+    renderSessionCards();
+    updateAircraftSummary();
+    regroup();
+    updateSelectedSessions();
+    loadManualTags();
+  }
+
+  function getFilteredAircraftList() {
+    const query = el.acSearchInput.value.toLowerCase().trim();
+    return state.aircraftList.filter((aircraft) =>
+      aircraft.aircraft.toLowerCase().includes(query) ||
+      aircraft.routes.some((route) => route.toLowerCase().includes(query)),
+    );
+  }
+
+  function updateAircraftSummary() {
+    const aircraft = state.aircraftList.filter((item) =>
+      state.selectedAircraftIds.has(item.aircraft),
+    );
+    const sessions = state.allSessionsData.filter((session) =>
+      state.selectedAircraftIds.has(session.aircraft),
+    );
+    const routes = new Set(sessions.map((session) => `${session.src || '?'}->${session.dest || '?'}`));
+    state.selectedAircraft = aircraft.some((item) => item.aircraft === state.selectedAircraft)
+      ? state.selectedAircraft
+      : (aircraft[0]?.aircraft || null);
+    el.metaAcId.textContent = aircraft.length
+      ? `${aircraft.length} aircraft selected`
+      : 'None';
+    el.metaAcSessions.textContent = `${sessions.length} sessions`;
+    el.metaAcRoutes.textContent = [...routes].slice(0, 3).join(', ') || '-';
   }
 
   // Render Session Cards
   function renderSessionCards() {
     el.sessionsContainer.innerHTML = '';
-    if (!state.aircraftDetails) return;
-
-    state.aircraftDetails.sessions.forEach(sess => {
+    const sessions = state.allSessionsData.filter((session) =>
+      state.selectedAircraftIds.has(session.aircraft),
+    );
+    sessions.forEach(sess => {
       const card = document.createElement('div');
       card.className = `session-card ${state.selectedSessionIds.has(sess.id) ? 'active' : ''} ${sess.id === state.focusedSessionId ? 'focused' : ''}`;
       card.dataset.id = sess.id;
@@ -729,21 +814,29 @@
       const secDuration = Math.round(durSeconds % 60);
       const durStr = `${minDuration}m ${secDuration}s`;
       const routeStr = `${sess.src || '—'} → ${sess.dest || '—'}`;
+      const phaseCounts = (sess.phase_samples || []).reduce((counts, sample) => {
+        counts[sample.phase || 'unknown'] = (counts[sample.phase || 'unknown'] || 0) + 1;
+        return counts;
+      }, {});
+      const dominantPhase = sess.dominant_phase ||
+        Object.entries(phaseCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || 'unknown';
+      const manualTagCount = state.manualTags.filter((tag) => tag.session_id === sess.id).length;
 
       card.innerHTML = `
         <input type="checkbox" id="chk-${sess.id}" ${isChecked ? 'checked' : ''}>
         <div class="session-info">
           <div class="session-title-row">
+            <span class="badge-kind">${sess.aircraft}</span>
             <span class="session-id">${sess.id}</span>
             <span class="badge-kind ${sess.complete_kind}">${sess.complete_kind || sess.session_type}</span>
-            ${sess.manual_tag_count > 0 ? `<span class="badge-kind" style="background:#065f46;color:#6ee7b7;">${sess.manual_tag_count} Tag${sess.manual_tag_count > 1 ? 's' : ''}</span>` : ''}
+            ${manualTagCount > 0 ? `<span class="badge-kind" style="background:#065f46;color:#6ee7b7;">${manualTagCount} Tag${manualTagCount > 1 ? 's' : ''}</span>` : ''}
           </div>
           <div class="session-sub-row">
             <span>Route: <strong>${routeStr}</strong></span>
             <span>·</span>
-            <span>${sess.n_points} pts (${durStr})</span>
+            <span>${sess.n_points || sess.points?.length || 0} pts (${durStr})</span>
             <span>·</span>
-            <span style="color:${PHASE_COLORS[sess.dominant_phase] || '#fff'};">● ${sess.dominant_phase}</span>
+            <span style="color:${PHASE_COLORS[dominantPhase] || '#fff'};">● ${dominantPhase}</span>
           </div>
         </div>
         <button class="session-focus-btn" title="Focus 3D camera & timeline on this session">Focus</button>
@@ -759,7 +852,12 @@
           state.selectedSessionIds.delete(sess.id);
           card.classList.remove('active');
         }
-        fetchSelectedSessionsBatch();
+        if (!state.selectedSessionIds.has(state.focusedSessionId)) {
+          state.focusedSessionId = state.selectedSessionIds.values().next().value || null;
+        }
+        syncSessionCheckboxes();
+        regroup();
+        updateSelectedSessions();
       });
 
       card.addEventListener('click', (e) => {
@@ -771,8 +869,11 @@
       card.querySelector('.session-focus-btn').addEventListener('click', (e) => {
         e.stopPropagation();
         state.focusedSessionId = sess.id;
+        state.selectedAircraft = sess.aircraft;
         el.tagTargetSession.value = sess.id;
+        updateAircraftSummary();
         updateTimelineAndRibbons();
+        renderAltitudeChart();
         syncSessionFocusHighlight();
       });
 
@@ -798,77 +899,90 @@
 
   function populateTagSessionDropdown() {
     el.tagTargetSession.innerHTML = '';
-    if (!state.aircraftDetails) return;
-
-    state.aircraftDetails.sessions.forEach(s => {
+    state.sessionsData.forEach(s => {
       const opt = document.createElement('option');
       opt.value = s.id;
-      opt.textContent = `${s.id} (${s.src || '?'} → ${s.dest || '?'})`;
+      opt.textContent = `${s.aircraft} · ${s.id} (${s.src || '?'} → ${s.dest || '?'})`;
       if (s.id === state.focusedSessionId) opt.selected = true;
       el.tagTargetSession.appendChild(opt);
     });
   }
 
-  // Fetch Batch Data for Selected Sessions
-  async function fetchSelectedSessionsBatch() {
-    const sids = Array.from(state.selectedSessionIds);
-    if (sids.length === 0) {
-      state.sessionsData = [];
-      state.maxT = 100;
-      updateHeaderSummary();
-      updateTimelineAndRibbons();
-      rebuild3DScene();
-      return;
+  function populateAirportFilter(select, key, label) {
+    const values = new Set();
+    let hasUnspecified = false;
+    for (const session of state.allSessionsData) {
+      const value = String(session[key] || '').trim();
+      if (value) values.add(value);
+      else hasUnspecified = true;
     }
 
-    try {
-      el.selectionSummary.textContent = `Loading ${sids.length} session${sids.length > 1 ? 's' : ''}...`;
-      const resp = await fetch('/api/sessions/batch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_ids: sids }),
-      });
-      if (!resp.ok) throw new Error('Failed to load session batch');
-
-      const data = await resp.json();
-      state.sessionsData = data.sessions;
-      state.bounds = data.bounds;
-      state.airports = data.airports || [];
-
-      // Determine max time duration in seconds across selected sessions
-      const durations = state.sessionsData.map(s => {
-        if (s.duration_s != null && s.duration_s > 0) return s.duration_s;
-        if (s.phase_samples && s.phase_samples.length > 0) {
-          return s.phase_samples[s.phase_samples.length - 1].time_s || 0;
-        }
-        return (s.t_max || 0);
-      });
-      state.maxT = Math.max(60, ...durations);
-      el.timeScrubber.max = state.maxT;
-
-      if (!state.selectedSessionIds.has(state.focusedSessionId)) {
-        state.focusedSessionId = sids[0];
-        el.tagTargetSession.value = state.focusedSessionId;
-      }
-
-      updateHeaderSummary();
-      updateTimelineAndRibbons();
-      rebuild3DScene();
-      renderAltitudeChart();
-    } catch (err) {
-      console.error(err);
-      el.selectionSummary.textContent = 'Error loading sessions batch';
+    select.replaceChildren(new Option(`All ${label.toLowerCase()}s`, '*'));
+    for (const value of [...values].sort((a, b) => a.localeCompare(b))) {
+      select.add(new Option(value, value));
     }
+    if (hasUnspecified) select.add(new Option('Unspecified', '__unspecified__'));
+  }
+
+  function regroup() {
+    if (!state.allSessionsData.length) return;
+
+    const enabledKinds = new Set(
+      [...document.querySelectorAll('#filters input[data-kind]:checked')]
+        .map((input) => input.dataset.kind),
+    );
+    const source = document.getElementById('source-airport').value;
+    const destination = document.getElementById('destination-airport').value;
+    const airportMatches = (value, selected) => {
+      if (selected === '*') return true;
+      const airport = String(value || '').trim();
+      return selected === '__unspecified__' ? !airport : airport === selected;
+    };
+
+    state.visible = state.allSessionsData.filter((session) =>
+      enabledKinds.has(session.complete_kind) &&
+      airportMatches(session.src, source) &&
+      airportMatches(session.dest, destination) &&
+      state.selectedAircraftIds.has(session.aircraft) &&
+      state.selectedSessionIds.has(session.id),
+    );
+    populateTagSessionDropdown();
+    rebuild3DScene();
+  }
+
+  function updateSelectedSessions() {
+    state.sessionsData = state.allSessionsData.filter((session) =>
+      state.selectedAircraftIds.has(session.aircraft) &&
+      state.selectedSessionIds.has(session.id),
+    );
+    state.bounds = state.allBounds;
+    state.airports = state.allAirports;
+    const durations = state.sessionsData.map((session) =>
+      Number(session.duration_s || session.t_max) || 0,
+    );
+    state.maxT = Math.max(60, ...durations);
+    state.t = Math.min(state.t, state.maxT);
+    el.timeScrubber.max = state.maxT;
+
+    if (!state.selectedSessionIds.has(state.focusedSessionId)) {
+      state.focusedSessionId = state.sessionsData[0]?.id || null;
+    }
+    if (state.focusedSessionId) el.tagTargetSession.value = state.focusedSessionId;
+
+    populateTagSessionDropdown();
+    updateHeaderSummary();
+    seekTime(state.t);
+    updateTimelineAndRibbons();
+    rebuild3DScene();
+    renderAltitudeChart();
   }
 
   function updateHeaderSummary() {
-    const n = state.selectedSessionIds.size;
-    const total = state.aircraftDetails?.session_count || 0;
-    if (n === total) {
-      el.selectionSummary.textContent = `Aircraft ${state.selectedAircraft} · All ${n} Sessions Active (Default)`;
-    } else {
-      el.selectionSummary.textContent = `Aircraft ${state.selectedAircraft} · ${n} of ${total} Sessions Selected`;
-    }
+    const totalSessions = state.allSessionsData.filter((session) =>
+      state.selectedAircraftIds.has(session.aircraft),
+    ).length;
+    const aircraftCount = state.selectedAircraftIds.size;
+    el.selectionSummary.textContent = `${aircraftCount} aircraft · ${state.sessionsData.length} of ${totalSessions} sessions selected`;
   }
 
   // Rebuild 3D Scene (Ground grid, radar rings, 3D trajectory lines, airport markers)
@@ -891,9 +1005,9 @@
     }
     trajectoryObjects = [];
 
-    if (!state.bounds || state.sessionsData.length === 0) return;
+    if (!(state.allBounds || state.bounds) || state.visible.length === 0) return;
 
-    const b = state.bounds;
+    const b = state.allBounds || state.bounds;
     const midLon = (b.min_lon + b.max_lon) / 2;
     const midLat = (b.min_lat + b.max_lat) / 2;
 
@@ -903,7 +1017,8 @@
     groundGroup.add(grid);
 
     // 2. Concentric Radar Range Rings on the ground around JFK
-    const jfkApt = state.airports.find(a => a.code === 'JFK') || { longitude: -73.7789, latitude: 40.6398 };
+    const airports = state.allAirports.length ? state.allAirports : state.airports;
+    const jfkApt = airports.find(a => a.code === 'JFK') || { longitude: -73.7789, latitude: 40.6398 };
     const jfkPos = worldTo3D(jfkApt.longitude, jfkApt.latitude, 0, midLon, midLat);
 
     [10, 25, 50].forEach(nm => {
@@ -940,7 +1055,7 @@
     });
 
     // 3. Airport Ground Markers and Labels
-    state.airports.forEach(apt => {
+    airports.forEach(apt => {
       const aptPos = worldTo3D(apt.longitude, apt.latitude, 0, midLon, midLat);
 
       // Glowing pad
@@ -958,7 +1073,7 @@
     });
 
     // 4. 3D Flight Trajectories
-    state.sessionsData.forEach((session, sIdx) => {
+    state.visible.forEach((session, sIdx) => {
       const isFocused = session.id === state.focusedSessionId;
       const points = session.points || [];
       const samples = session.phase_samples || [];
@@ -1177,34 +1292,40 @@
       const hit = intersects[0];
       const sid = hit.object.userData.sessionId;
       if (sid) {
-        state.focusedSessionId = sid;
-        el.tagTargetSession.value = sid;
-
-        const session = state.sessionsData.find(s => s.id === sid);
-        if (session && hit.point) {
-          // Find closest point in trajectory to hit.point
-          const b = state.bounds;
-          const midLon = (b.min_lon + b.max_lon) / 2;
-          const midLat = (b.min_lat + b.max_lat) / 2;
-          let nearestTime = 0;
-          let minDSq = Infinity;
-
-          session.points.forEach((pt, idx) => {
-            const v3 = worldTo3D(pt[0], pt[1], pt[2], midLon, midLat);
-            const dSq = v3.distanceToSquared(hit.point);
-            if (dSq < minDSq) {
-              minDSq = dSq;
-              nearestTime = session.phase_samples[idx]?.time_s || 0;
-            }
-          });
-          seekTime(nearestTime);
-        }
-
-        updateTimelineAndRibbons();
-        syncSessionFocusHighlight();
-        rebuild3DScene();
+        const session = state.visible.find((candidate) => candidate.id === sid);
+        if (session) focusSession(session, hit.point);
       }
     }
+  }
+
+  async function focusSession(session, hitPoint) {
+    state.selectedAircraft = session.aircraft;
+    state.focusedSessionId = session.id;
+    el.tagTargetSession.value = session.id;
+    updateAircraftSummary();
+    updateTimelineAndRibbons();
+    renderAltitudeChart();
+    if (hitPoint) {
+      const b = state.allBounds || state.bounds;
+      const midLon = (b.min_lon + b.max_lon) / 2;
+      const midLat = (b.min_lat + b.max_lat) / 2;
+      let nearestTime = 0;
+      let minDSq = Infinity;
+
+      session.points.forEach((point, index) => {
+        const position = worldTo3D(point[0], point[1], point[2], midLon, midLat);
+        const distanceSq = position.distanceToSquared(hitPoint);
+        if (distanceSq < minDSq) {
+          minDSq = distanceSq;
+          nearestTime = session.phase_samples[index]?.time_s || 0;
+        }
+      });
+      seekTime(nearestTime);
+    }
+
+    updateTimelineAndRibbons();
+    syncSessionFocusHighlight();
+    rebuild3DScene();
   }
 
   // Animation Loop & Playback Controls
@@ -1260,9 +1381,9 @@
 
   // Update 3D Aircraft Positions, Orientations, and Altitude Drop Lines
   function update3DAircraftPositions() {
-    if (!state.bounds || state.sessionsData.length === 0) return;
+    if (!(state.allBounds || state.bounds) || state.visible.length === 0) return;
 
-    const b = state.bounds;
+    const b = state.allBounds || state.bounds;
     const midLon = (b.min_lon + b.max_lon) / 2;
     const midLat = (b.min_lat + b.max_lat) / 2;
 
@@ -1597,15 +1718,32 @@
 
   // Manual Tagging Operations
   async function loadManualTags() {
-    if (!state.selectedAircraft) return;
+    const requestVersion = ++state.manualTagLoadVersion;
+    const aircraftIds = [...state.selectedAircraftIds];
+    if (aircraftIds.length === 0) {
+      state.manualTags = [];
+      renderTagsList();
+      updateTimelineAndRibbons();
+      rebuild3DScene();
+      return;
+    }
+
     try {
-      const resp = await fetch(`/api/tags?aircraft=${state.selectedAircraft}`);
-      if (resp.ok) {
-        state.manualTags = await resp.json();
-        renderTagsList();
-        updateTimelineAndRibbons();
-        rebuild3DScene();
+      const responses = await Promise.all(aircraftIds.map(async (aircraftId) => {
+        const resp = await fetch(`/api/tags?aircraft=${encodeURIComponent(aircraftId)}`);
+        if (!resp.ok) throw new Error(`Failed to load tags for aircraft ${aircraftId}`);
+        return resp.json();
+      }));
+      if (requestVersion !== state.manualTagLoadVersion) return;
+
+      state.manualTags = responses.flat();
+      for (const session of state.allSessionsData) {
+        session.manual_tags = state.manualTags.filter((tag) => tag.session_id === session.id);
       }
+      renderSessionCards();
+      renderTagsList();
+      updateTimelineAndRibbons();
+      rebuild3DScene();
     } catch (err) {
       console.error(err);
     }
@@ -1616,7 +1754,7 @@
     el.tagsCount.textContent = state.manualTags.length;
 
     if (state.manualTags.length === 0) {
-      el.tagsList.innerHTML = '<div class="empty-hint">No manual tags applied to this aircraft yet.</div>';
+      el.tagsList.innerHTML = '<div class="empty-hint">No manual tags applied to the selected aircraft.</div>';
       return;
     }
 
@@ -1639,10 +1777,21 @@
       `;
 
       item.querySelector('.btn-jump').addEventListener('click', () => {
+        const session = state.allSessionsData.find((candidate) => candidate.id === tag.session_id);
+        if (!session) return;
+        if (!state.selectedSessionIds.has(session.id)) {
+          state.selectedSessionIds.add(session.id);
+          renderSessionCards();
+          regroup();
+          updateSelectedSessions();
+        }
+        state.selectedAircraft = session.aircraft;
         state.focusedSessionId = tag.session_id;
         el.tagTargetSession.value = tag.session_id;
         seekTime(tag.t_start_s);
+        updateAircraftSummary();
         updateTimelineAndRibbons();
+        renderAltitudeChart();
         syncSessionFocusHighlight();
       });
 
@@ -1670,7 +1819,7 @@
 
     const payload = {
       session_id: sid,
-      aircraft: state.selectedAircraft,
+      aircraft: state.allSessionsData.find((session) => session.id === sid)?.aircraft || state.selectedAircraft,
       t_start_s: tStart,
       t_end_s: tEnd,
       manual_phase: state.activeTagPhase,
