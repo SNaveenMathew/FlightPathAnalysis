@@ -212,6 +212,9 @@
             <label class="checkbox-label">
               <input type="checkbox" id="chk-show-tags-overlay" checked> Manual Tags
             </label>
+            <button id="btn-toggle-neighborhood" class="btn-toggle active" title="Toggle traffic neighborhood (ghost aircraft animated in 4D space-time)">
+              <span class="icon">📡</span> Neighborhood Ghosts <span class="badge" id="neighborhood-count-badge">0</span>
+            </button>
           </div>
 
           <div class="toolbar-right">
@@ -233,6 +236,40 @@
             <div class="hud-item"><span class="hud-label">V/S</span><span class="hud-val mono" id="hud-vs">- fpm</span></div>
             <div class="hud-item"><span class="hud-label">PRED</span><span class="hud-badge mono" id="hud-pred-phase">-</span></div>
             <div class="hud-item"><span class="hud-label">MANUAL</span><span class="hud-badge mono" id="hud-manual-phase">None</span></div>
+          </div>
+
+          <!-- Airspace Neighborhood & Separation Panel -->
+          <div id="neighborhood-panel" class="neighborhood-panel">
+            <div class="neighborhood-panel-header" id="neighborhood-header">
+              <div class="neighborhood-header-title">
+                <span class="ghost-icon">📡</span>
+                <span class="title-text">Airspace Neighborhood</span>
+                <span class="cpa-badge" id="cpa-summary-badge">FAA Standards</span>
+              </div>
+              <button id="btn-toggle-nb-panel" class="btn-micro" title="Collapse / Expand panel">_</button>
+            </div>
+            <div class="neighborhood-panel-body" id="neighborhood-body">
+              <div class="nb-standards-hint">
+                <span class="hint-tag alert">FAA Terminal: 3 NM / 1,000 ft</span>
+                <span class="hint-tag in-trail">In-Trail: 180s spacing</span>
+              </div>
+              <div class="nb-active-time" id="nb-active-time">
+                <span class="time-label">Flight Window (UTC):</span>
+                <span class="time-val mono" id="nb-time-val">—</span>
+              </div>
+              <div class="nb-closest-callout" id="nb-closest-callout">
+                <div class="closest-label">LIVE SEPARATION (CLOSEST TRAFFIC)</div>
+                <div class="closest-metrics">
+                  <span class="metric-dist mono" id="nb-closest-dist">— NM</span>
+                  <span class="metric-alt mono" id="nb-closest-alt">— ft</span>
+                  <span class="status-pill" id="nb-closest-status">No Traffic</span>
+                </div>
+              </div>
+              <div class="nb-list-title">Concurrent Flights (<span id="nb-count-val">0</span> within 15 NM):</div>
+              <div id="neighborhood-list" class="neighborhood-list">
+                <div class="nb-empty-hint">Click on an aircraft in 3D to inspect its neighborhood</div>
+              </div>
+            </div>
           </div>
 
           <!-- Phase Color Legend -->

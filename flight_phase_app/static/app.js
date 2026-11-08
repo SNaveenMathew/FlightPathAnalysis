@@ -62,6 +62,10 @@
     showGroundTrack: true,
     showTagsOverlay: true,
     followAircraft: true,
+    showNeighborhood: true,
+    neighborhoodData: null,
+    neighborhoodCache: new Map(),
+    highlightedGhostId: null,
 
     // Timeline Drag Selection
     isSelectingTimeline: false,
@@ -106,6 +110,18 @@
     btnZoomOut: document.getElementById('btn-zoom-out'),
     btnZoomReset: document.getElementById('btn-zoom-reset'),
     btnFollowAc: document.getElementById('btn-follow-ac'),
+    btnToggleNeighborhood: document.getElementById('btn-toggle-neighborhood'),
+    neighborhoodCountBadge: document.getElementById('neighborhood-count-badge'),
+    neighborhoodPanel: document.getElementById('neighborhood-panel'),
+    btnToggleNbPanel: document.getElementById('btn-toggle-nb-panel'),
+    neighborhoodHeader: document.getElementById('neighborhood-header'),
+    nbActiveTime: document.getElementById('nb-time-val'),
+    nbClosestDist: document.getElementById('nb-closest-dist'),
+    nbClosestAlt: document.getElementById('nb-closest-alt'),
+    nbClosestStatus: document.getElementById('nb-closest-status'),
+    nbCountVal: document.getElementById('nb-count-val'),
+    neighborhoodList: document.getElementById('neighborhood-list'),
+    cpaSummaryBadge: document.getElementById('cpa-summary-badge'),
 
     threeContainer: document.getElementById('three-container'),
     hudAlt: document.getElementById('hud-alt'),
@@ -159,10 +175,13 @@
   let camera = null;
   let groundGroup = null;
   let trajectoriesGroup = null;
+  let ghostGroup = null;
   let aircraftGroup = null;
   let airportSpritesGroup = null;
   let aircraftMeshes = new Map(); // sessionId -> { mesh, dropLine, sprite }
+  let ghostMeshes = new Map(); // sessionId -> { mesh, line, dropLine, sprite, proxLine, proxSprite, neighbor }
   let trajectoryObjects = [];
+  let aircraftClickObjects = [];
 
   // Anchor & Geographic projection reference (JFK)
   const REF_ORIGIN = { lon: -73.7789, lat: 40.6398 };
@@ -317,11 +336,13 @@
     // Groups for organized rendering
     groundGroup = new THREE.Group();
     trajectoriesGroup = new THREE.Group();
+    ghostGroup = new THREE.Group();
     aircraftGroup = new THREE.Group();
     airportSpritesGroup = new THREE.Group();
 
     scene.add(groundGroup);
     scene.add(trajectoriesGroup);
+    scene.add(ghostGroup);
     scene.add(aircraftGroup);
     scene.add(airportSpritesGroup);
 
@@ -405,6 +426,37 @@
       state.showTagsOverlay = e.target.checked;
       rebuild3DScene();
     });
+
+    if (el.btnToggleNeighborhood) {
+      el.btnToggleNeighborhood.addEventListener('click', () => {
+        state.showNeighborhood = !state.showNeighborhood;
+        el.btnToggleNeighborhood.classList.toggle('active', state.showNeighborhood);
+        if (el.neighborhoodPanel) {
+          el.neighborhoodPanel.style.display = state.showNeighborhood ? 'flex' : 'none';
+        }
+        if (ghostGroup) ghostGroup.visible = state.showNeighborhood;
+        if (state.showNeighborhood && state.focusedSessionId) {
+          loadNeighborhood(state.focusedSessionId);
+        }
+      });
+    }
+
+    if (el.btnToggleNbPanel && el.neighborhoodPanel) {
+      el.btnToggleNbPanel.addEventListener('click', (e) => {
+        e.stopPropagation();
+        el.neighborhoodPanel.classList.toggle('collapsed');
+        el.btnToggleNbPanel.textContent = el.neighborhoodPanel.classList.contains('collapsed') ? '▢' : '_';
+      });
+    }
+
+    if (el.neighborhoodHeader && el.neighborhoodPanel) {
+      el.neighborhoodHeader.addEventListener('click', () => {
+        el.neighborhoodPanel.classList.toggle('collapsed');
+        if (el.btnToggleNbPanel) {
+          el.btnToggleNbPanel.textContent = el.neighborhoodPanel.classList.contains('collapsed') ? '▢' : '_';
+        }
+      });
+    }
 
     el.btnFollowAc.addEventListener('click', () => {
       state.followAircraft = !state.followAircraft;
@@ -975,6 +1027,9 @@
     updateTimelineAndRibbons();
     rebuild3DScene();
     renderAltitudeChart();
+    if (state.focusedSessionId) {
+      loadNeighborhood(state.focusedSessionId);
+    }
   }
 
   function updateHeaderSummary() {
@@ -996,6 +1051,13 @@
     while (trajectoriesGroup.children.length > 0) {
       trajectoriesGroup.remove(trajectoriesGroup.children[0]);
     }
+    if (ghostGroup) {
+      while (ghostGroup.children.length > 0) {
+        ghostGroup.remove(ghostGroup.children[0]);
+      }
+    }
+    ghostMeshes.clear();
+    aircraftClickObjects = [];
     while (airportSpritesGroup.children.length > 0) {
       airportSpritesGroup.remove(airportSpritesGroup.children[0]);
     }
@@ -1191,6 +1253,19 @@
       });
     });
 
+    // Register active aircraft meshes for click raycasting
+    aircraftMeshes.forEach(({ mesh, session }) => {
+      mesh.traverse(child => {
+        if (child.isMesh) {
+          child.userData = { sessionId: session.id, isGhost: false, aircraft: session.aircraft };
+          aircraftClickObjects.push(child);
+        }
+      });
+    });
+
+    // Rebuild Ghost Neighborhood in 3D
+    rebuildGhostScene();
+
     // Update 3D Camera Focus position
     const focusedSession = state.sessionsData.find(s => s.id === state.focusedSessionId) || state.sessionsData[0];
     if (focusedSession && focusedSession.points.length > 0) {
@@ -1273,9 +1348,9 @@
     return sprite;
   }
 
-  // Handle Click on 3D Trajectory (Raycasting)
+  // Handle Click on 3D Aircraft or Trajectory (Raycasting)
   function handle3DClick(event) {
-    if (!camera || trajectoryObjects.length === 0) return;
+    if (!camera) return;
 
     const rect = renderer.domElement.getBoundingClientRect();
     const mouse = new THREE.Vector2(
@@ -1287,13 +1362,32 @@
     raycaster.params.Line = { threshold: 4.0 };
     raycaster.setFromCamera(mouse, camera);
 
-    const intersects = raycaster.intersectObjects(trajectoryObjects);
+    // Raycast on trajectory lines AND aircraft meshes (both main and ghosts)
+    const clickCandidates = [...trajectoryObjects, ...aircraftClickObjects];
+    const intersects = raycaster.intersectObjects(clickCandidates, true);
     if (intersects.length > 0) {
       const hit = intersects[0];
-      const sid = hit.object.userData.sessionId;
+      let sid = hit.object.userData?.sessionId;
+      let isGhost = hit.object.userData?.isGhost;
+      if (!sid) {
+        let p = hit.object.parent;
+        while (p && !sid) {
+          if (p.userData?.sessionId) {
+            sid = p.userData.sessionId;
+            isGhost = p.userData.isGhost;
+            break;
+          }
+          p = p.parent;
+        }
+      }
+
       if (sid) {
-        const session = state.visible.find((candidate) => candidate.id === sid);
-        if (session) focusSession(session, hit.point);
+        if (isGhost) {
+          highlightGhostNeighbor(sid);
+        } else {
+          const session = state.visible.find((candidate) => candidate.id === sid);
+          if (session) focusSession(session, hit.point);
+        }
       }
     }
   }
@@ -1326,6 +1420,9 @@
     updateTimelineAndRibbons();
     syncSessionFocusHighlight();
     rebuild3DScene();
+    if (session.id) {
+      loadNeighborhood(session.id);
+    }
   }
 
   // Animation Loop & Playback Controls
@@ -1436,6 +1533,144 @@
         orbit.update();
       }
     });
+
+    // Update Ghost Aircraft Positions, Orientations & Real-Time Proximity
+    if (state.showNeighborhood && ghostMeshes.size > 0) {
+      const focusedSession = state.sessionsData.find(s => s.id === state.focusedSessionId) || state.sessionsData[0];
+      const activeInterp = focusedSession ? interpolatePointAtTime(focusedSession, state.t) : null;
+      const activePos = activeInterp
+        ? worldTo3D(activeInterp.lon, activeInterp.lat, activeInterp.alt, midLon, midLat)
+        : null;
+
+      let closestActiveDistNm = Infinity;
+      let closestActiveAltFt = 0;
+      let closestStatus = 'No Traffic';
+
+      ghostMeshes.forEach(({ mesh, dropLine, sprite, proxLine, proxSprite, neighbor }) => {
+        const relStart = neighbor.relative_start_s;
+        const relEnd = neighbor.relative_end_s;
+        const isPresent = state.t >= relStart && state.t <= relEnd;
+
+        if (!isPresent) {
+          mesh.visible = false;
+          dropLine.visible = false;
+          sprite.visible = false;
+          if (proxLine) proxLine.visible = false;
+          if (proxSprite) proxSprite.visible = false;
+          return;
+        }
+
+        const interpGhost = interpolateGhostPointAtTime(neighbor, state.t);
+        if (!interpGhost) {
+          mesh.visible = false;
+          dropLine.visible = false;
+          sprite.visible = false;
+          if (proxLine) proxLine.visible = false;
+          if (proxSprite) proxSprite.visible = false;
+          return;
+        }
+
+        mesh.visible = true;
+        const ghostPos = worldTo3D(interpGhost.lon, interpGhost.lat, interpGhost.alt, midLon, midLat);
+        mesh.position.copy(ghostPos);
+
+        // Orient ghost along heading
+        if (interpGhost.nextPos) {
+          const next3D = worldTo3D(interpGhost.nextPos[0], interpGhost.nextPos[1], interpGhost.nextPos[2], midLon, midLat);
+          const dir = new THREE.Vector3().subVectors(next3D, ghostPos).normalize();
+          if (dir.lengthSq() > 0.001) {
+            const targetRot = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(1, 0, 0), dir);
+            mesh.quaternion.slerp(targetRot, 0.4);
+          }
+        } else {
+          mesh.rotation.y = -(interpGhost.heading * Math.PI) / 180;
+        }
+
+        // Update ghost vertical drop line to ground
+        const dropGeom = dropLine.geometry;
+        dropGeom.setAttribute('position', new THREE.Float32BufferAttribute([ghostPos.x, ghostPos.y, ghostPos.z, ghostPos.x, 0.05, ghostPos.z], 3));
+        dropLine.computeLineDistances();
+        dropLine.visible = true;
+
+        // Update ghost callout sprite
+        sprite.visible = true;
+        sprite.position.set(ghostPos.x, ghostPos.y + 3.8, ghostPos.z);
+
+        // Calculate real-time separation to active aircraft
+        if (activeInterp && activePos) {
+          const midLatRad = ((activeInterp.lat + interpGhost.lat) / 2) * (Math.PI / 180);
+          const dxNm = (activeInterp.lon - interpGhost.lon) * Math.cos(midLatRad) * 60;
+          const dyNm = (activeInterp.lat - interpGhost.lat) * 60;
+          const distNm = Math.sqrt(dxNm * dxNm + dyNm * dyNm);
+          const altDiffFt = activeInterp.alt - interpGhost.alt;
+          const absAltDiff = Math.abs(altDiffFt);
+
+          if (distNm < closestActiveDistNm) {
+            closestActiveDistNm = distNm;
+            closestActiveAltFt = altDiffFt;
+            if (distNm < 3.0 && absAltDiff < 1000) {
+              closestStatus = 'alert';
+            } else if (distNm < 5.0 && absAltDiff < 2000) {
+              closestStatus = 'caution';
+            } else if (neighbor.separation_status === 'in_trail') {
+              closestStatus = 'in_trail';
+            } else {
+              closestStatus = 'neighborhood';
+            }
+          }
+
+          // Show proximity connector line if within 8 NM
+          if (distNm <= 8.0 && proxLine && proxSprite) {
+            proxLine.visible = true;
+            proxSprite.visible = true;
+            const pGeom = proxLine.geometry;
+            pGeom.setAttribute('position', new THREE.Float32BufferAttribute([
+              activePos.x, activePos.y, activePos.z,
+              ghostPos.x, ghostPos.y, ghostPos.z
+            ], 3));
+            proxLine.computeLineDistances();
+
+            const isLossOfSep = distNm < 3.0 && absAltDiff < 1000;
+            const isCautionSep = distNm < 5.0 && absAltDiff < 2000;
+            if (isLossOfSep) {
+              proxLine.material.color.setHex(0xf87171);
+            } else if (isCautionSep) {
+              proxLine.material.color.setHex(0xfacc15);
+            } else {
+              proxLine.material.color.setHex(0x38bdf8);
+            }
+
+            const midX = (activePos.x + ghostPos.x) / 2;
+            const midY = (activePos.y + ghostPos.y) / 2 + 2.0;
+            const midZ = (activePos.z + ghostPos.z) / 2;
+            proxSprite.position.set(midX, midY, midZ);
+          } else {
+            if (proxLine) proxLine.visible = false;
+            if (proxSprite) proxSprite.visible = false;
+          }
+        }
+      });
+
+      // Update Neighborhood HUD telemetry
+      if (closestActiveDistNm < Infinity) {
+        if (el.nbClosestDist) el.nbClosestDist.textContent = `${closestActiveDistNm.toFixed(1)} NM`;
+        if (el.nbClosestAlt) {
+          const sign = closestActiveAltFt >= 0 ? '+' : '';
+          el.nbClosestAlt.textContent = `${sign}${Math.round(closestActiveAltFt)} ft`;
+        }
+        if (el.nbClosestStatus) {
+          el.nbClosestStatus.className = `status-pill ${closestStatus}`;
+          el.nbClosestStatus.textContent = closestStatus.replace('_', ' ').toUpperCase();
+        }
+      } else {
+        if (el.nbClosestDist) el.nbClosestDist.textContent = '— NM';
+        if (el.nbClosestAlt) el.nbClosestAlt.textContent = '— ft';
+        if (el.nbClosestStatus) {
+          el.nbClosestStatus.className = 'status-pill';
+          el.nbClosestStatus.textContent = 'No Active Traffic';
+        }
+      }
+    }
   }
 
   function updateTimeDisplay() {
@@ -1570,6 +1805,421 @@
       heading: finalHeading,
       nextPos: null,
     };
+  }
+
+  // Interpolation helper for ghost aircraft (points are timestamped with t_rel_target)
+  function interpolateGhostPointAtTime(neighbor, t) {
+    const points = neighbor.points || [];
+    if (points.length === 0) return null;
+
+    if (t <= points[0][3]) {
+      const p = points[0];
+      const nextP = points[1] || p;
+      return { lon: p[0], lat: p[1], alt: p[2], heading: 0, nextPos: nextP };
+    }
+
+    for (let i = 0; i < points.length - 1; i++) {
+      const t0 = points[i][3];
+      const t1 = points[i + 1][3];
+      if (t >= t0 && t <= t1) {
+        const factor = t1 > t0 ? (t - t0) / (t1 - t0) : 0;
+        const p0 = points[i];
+        const p1 = points[i + 1];
+        const lon = p0[0] + (p1[0] - p0[0]) * factor;
+        const lat = p0[1] + (p1[1] - p0[1]) * factor;
+        const alt = p0[2] + (p1[2] - p0[2]) * factor;
+        const dLon = p1[0] - p0[0];
+        const dLat = p1[1] - p0[1];
+        const heading = (Math.atan2(dLon, dLat) * 180 / Math.PI + 360) % 360;
+        return { lon, lat, alt, heading, nextPos: p1 };
+      }
+    }
+
+    const lastP = points[points.length - 1];
+    let finalHeading = 0;
+    if (points.length >= 2) {
+      const pPrev = points[points.length - 2];
+      finalHeading = (Math.atan2(lastP[0] - pPrev[0], lastP[1] - pPrev[1]) * 180 / Math.PI + 360) % 360;
+    }
+    return { lon: lastP[0], lat: lastP[1], alt: lastP[2], heading: finalHeading, nextPos: null };
+  }
+
+  // Fetch neighborhood from API and render
+  async function loadNeighborhood(sessionId) {
+    if (!sessionId) {
+      state.neighborhoodData = null;
+      renderNeighborhoodPanel(null);
+      rebuildGhostScene();
+      return;
+    }
+
+    // Check memory cache
+    if (state.neighborhoodCache.has(sessionId)) {
+      state.neighborhoodData = state.neighborhoodCache.get(sessionId);
+      renderNeighborhoodPanel(state.neighborhoodData);
+      rebuildGhostScene();
+      return;
+    }
+
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/neighborhood?max_distance_nm=15.0&limit=15`);
+      if (!res.ok) {
+        state.neighborhoodData = null;
+        renderNeighborhoodPanel(null);
+        rebuildGhostScene();
+        return;
+      }
+      const data = await res.json();
+      state.neighborhoodCache.set(sessionId, data);
+      state.neighborhoodData = data;
+      renderNeighborhoodPanel(data);
+      rebuildGhostScene();
+    } catch (err) {
+      console.warn("Could not load neighborhood for session", sessionId, err);
+    }
+  }
+
+  // Render Neighborhood Panel UI
+  function renderNeighborhoodPanel(data) {
+    if (!el.neighborhoodPanel) return;
+
+    if (!data || !data.neighbors || data.neighbors.length === 0) {
+      if (el.neighborhoodCountBadge) el.neighborhoodCountBadge.textContent = '0';
+      if (el.nbCountVal) el.nbCountVal.textContent = '0';
+      if (el.nbActiveTime) el.nbActiveTime.textContent = '—';
+      if (el.nbClosestDist) el.nbClosestDist.textContent = '— NM';
+      if (el.nbClosestAlt) el.nbClosestAlt.textContent = '— ft';
+      if (el.nbClosestStatus) {
+        el.nbClosestStatus.className = 'status-pill';
+        el.nbClosestStatus.textContent = 'No Traffic';
+      }
+      if (el.neighborhoodList) {
+        el.neighborhoodList.innerHTML = '<div class="empty-hint">No concurrent flights within 15 NM neighborhood</div>';
+      }
+      return;
+    }
+
+    const target = data.target;
+    const neighbors = data.neighbors;
+
+    if (el.neighborhoodCountBadge) el.neighborhoodCountBadge.textContent = String(neighbors.length);
+    if (el.nbCountVal) el.nbCountVal.textContent = String(neighbors.length);
+
+    if (el.nbActiveTime && target.start_time_utc) {
+      const durMin = Math.round((target.duration_s || 0) / 60);
+      const startTime = target.start_time_utc.replace('T', ' ').slice(0, 19);
+      el.nbActiveTime.textContent = `${startTime} UTC (${durMin} min flight)`;
+    }
+
+    if (!el.neighborhoodList) return;
+    el.neighborhoodList.innerHTML = '';
+
+    neighbors.forEach((neighbor) => {
+      const card = document.createElement('div');
+      const statusClass = neighbor.separation_status.replace('_', '-');
+      card.className = `neighbor-card ${statusClass}-card`;
+      card.dataset.sessionId = neighbor.session_id;
+
+      let statusBadgeLabel = 'Neighborhood';
+      if (neighbor.separation_status === 'alert') statusBadgeLabel = 'ALERT (<3 NM)';
+      else if (neighbor.separation_status === 'caution') statusBadgeLabel = 'CAUTION (<5 NM)';
+      else if (neighbor.separation_status === 'in_trail') statusBadgeLabel = 'IN-TRAIL (<180s)';
+
+      card.innerHTML = `
+        <div class="neighbor-card-header">
+          <span class="neighbor-card-ac">${neighbor.aircraft} (${neighbor.session_id})</span>
+          <span class="neighbor-card-route">${neighbor.src || '?'} → ${neighbor.dest || '?'}</span>
+        </div>
+        <div class="neighbor-card-body">
+          <div class="neighbor-cpa">
+            <span>CPA: <span class="dist">${neighbor.min_dist_nm.toFixed(1)} NM</span></span>
+            <span>Δalt: ${Math.round(neighbor.vert_diff_ft)} ft</span>
+          </div>
+          <span class="neighbor-status-badge ${statusClass}">${statusBadgeLabel}</span>
+        </div>
+      `;
+
+      card.addEventListener('mouseenter', () => {
+        state.highlightedGhostId = neighbor.session_id;
+        card.classList.add('active-ghost');
+        highlightGhostMesh(neighbor.session_id, true);
+      });
+
+      card.addEventListener('mouseleave', () => {
+        state.highlightedGhostId = null;
+        card.classList.remove('active-ghost');
+        highlightGhostMesh(neighbor.session_id, false);
+      });
+
+      card.addEventListener('click', () => {
+        selectNeighborAsFocused(neighbor);
+      });
+
+      el.neighborhoodList.appendChild(card);
+    });
+  }
+
+  // Highlight a specific ghost in 3D scene
+  function highlightGhostMesh(sessionId, isHighlighted) {
+    const entry = ghostMeshes.get(sessionId);
+    if (entry && entry.line && entry.line.material) {
+      entry.line.material.opacity = isHighlighted ? 0.9 : (entry.neighbor.separation_status === 'alert' ? 0.6 : 0.3);
+      entry.line.material.linewidth = isHighlighted ? 3.0 : 1.2;
+    }
+    if (entry && entry.mesh) {
+      entry.mesh.scale.setScalar(isHighlighted ? 1.7 : 1.3);
+    }
+  }
+
+  // Highlight neighbor in list when clicked in 3D
+  function highlightGhostNeighbor(sessionId) {
+    state.highlightedGhostId = sessionId;
+    if (el.neighborhoodList) {
+      el.neighborhoodList.querySelectorAll('.neighbor-card').forEach(card => {
+        const matches = card.dataset.sessionId === sessionId;
+        card.classList.toggle('active-ghost', matches);
+        if (matches) card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      });
+    }
+    highlightGhostMesh(sessionId, true);
+  }
+
+  // Switch focus to a neighbor flight
+  async function selectNeighborAsFocused(neighbor) {
+    const existingSession = state.allSessionsData.find(s => s.id === neighbor.session_id);
+    if (existingSession) {
+      if (!state.selectedAircraftIds.has(neighbor.aircraft)) {
+        state.selectedAircraftIds.add(neighbor.aircraft);
+      }
+      state.selectedSessionIds.add(neighbor.session_id);
+      state.focusedSessionId = neighbor.session_id;
+      state.selectedAircraft = neighbor.aircraft;
+      regroup();
+      updateSelectedSessions();
+      syncSessionCheckboxes();
+      syncSessionFocusHighlight();
+    } else {
+      try {
+        const res = await fetch('/api/sessions/batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_ids: [neighbor.session_id] }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.sessions && data.sessions.length > 0) {
+            state.allSessionsData.push(data.sessions[0]);
+            state.selectedAircraftIds.add(neighbor.aircraft);
+            state.selectedSessionIds.add(neighbor.session_id);
+            state.focusedSessionId = neighbor.session_id;
+            state.selectedAircraft = neighbor.aircraft;
+            renderSessionCards();
+            regroup();
+            updateSelectedSessions();
+          }
+        }
+      } catch (e) {
+        console.warn("Could not load neighbor session", e);
+      }
+    }
+  }
+
+  // Rebuild 3D Ghost Scene (Ghost aircraft models and dashed trajectory ribbons)
+  function rebuildGhostScene() {
+    if (!scene || !ghostGroup) return;
+
+    while (ghostGroup.children.length > 0) {
+      ghostGroup.remove(ghostGroup.children[0]);
+    }
+    ghostMeshes.clear();
+
+    if (!state.showNeighborhood || !state.neighborhoodData || !state.neighborhoodData.neighbors) {
+      if (el.neighborhoodCountBadge) el.neighborhoodCountBadge.textContent = '0';
+      return;
+    }
+
+    const b = state.allBounds || state.bounds;
+    if (!b) return;
+    const midLon = (b.min_lon + b.max_lon) / 2;
+    const midLat = (b.min_lat + b.max_lat) / 2;
+
+    const neighbors = state.neighborhoodData.neighbors;
+    if (el.neighborhoodCountBadge) el.neighborhoodCountBadge.textContent = String(neighbors.length);
+
+    neighbors.forEach((neighbor) => {
+      const points = neighbor.points || [];
+      if (points.length < 2) return;
+
+      const isAlert = neighbor.separation_status === 'alert';
+      const isCaution = neighbor.separation_status === 'caution';
+      const isHighlighted = state.highlightedGhostId === neighbor.session_id;
+
+      let ghostColorHex = 0x38bdf8;
+      if (isAlert) ghostColorHex = 0xf87171;
+      else if (isCaution) ghostColorHex = 0xfacc15;
+      else if (neighbor.separation_status === 'in_trail') ghostColorHex = 0x818cf8;
+
+      const positions = [];
+      for (let i = 0; i < points.length; i++) {
+        const pt = points[i];
+        const v3 = worldTo3D(pt[0], pt[1], pt[2], midLon, midLat);
+        positions.push(v3.x, v3.y, v3.z);
+      }
+
+      // Ghost Trajectory line (translucent dashed radar style)
+      const ghostTrajGeom = new THREE.BufferGeometry();
+      ghostTrajGeom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      const ghostTrajMat = new THREE.LineDashedMaterial({
+        color: ghostColorHex,
+        dashSize: 2.5,
+        gapSize: 2.0,
+        transparent: true,
+        opacity: isHighlighted ? 0.8 : (isAlert ? 0.6 : 0.3),
+        linewidth: isHighlighted ? 2.5 : 1.2,
+      });
+      const ghostLine = new THREE.Line(ghostTrajGeom, ghostTrajMat);
+      ghostLine.computeLineDistances();
+      ghostLine.userData = { sessionId: neighbor.session_id, isGhost: true, aircraft: neighbor.aircraft };
+      ghostGroup.add(ghostLine);
+      trajectoryObjects.push(ghostLine);
+
+      // Create Ghost 3D Aircraft Model
+      const ghostModel = create3DGhostAircraftModel(ghostColorHex);
+      ghostModel.userData = { sessionId: neighbor.session_id, isGhost: true, aircraft: neighbor.aircraft };
+      ghostModel.traverse(child => {
+        if (child.isMesh) {
+          child.userData = { sessionId: neighbor.session_id, isGhost: true, aircraft: neighbor.aircraft };
+          aircraftClickObjects.push(child);
+        }
+      });
+      ghostGroup.add(ghostModel);
+
+      // Ghost Altitude Drop Line to ground
+      const dropGeom = new THREE.BufferGeometry();
+      dropGeom.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0], 3));
+      const dropMat = new THREE.LineDashedMaterial({
+        color: ghostColorHex,
+        dashSize: 1.0,
+        gapSize: 1.0,
+        transparent: true,
+        opacity: 0.2,
+      });
+      const ghostDropLine = new THREE.Line(dropGeom, dropMat);
+      ghostGroup.add(ghostDropLine);
+
+      // Ghost HUD callout badge
+      const calloutText = `${neighbor.aircraft} [${neighbor.complete_kind.slice(0, 3).toUpperCase()}]`;
+      const ghostSprite = createTextSprite(
+        calloutText,
+        'rgba(10, 18, 32, 0.85)',
+        isAlert ? '#fca5a5' : '#7dd3fc',
+        isAlert ? '#f87171' : '#38bdf8'
+      );
+      ghostSprite.scale.set(8.5, 2.4, 1);
+      ghostGroup.add(ghostSprite);
+
+      // Proximity connector vector line to focused aircraft
+      const proxGeom = new THREE.BufferGeometry();
+      proxGeom.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0], 3));
+      const proxMat = new THREE.LineDashedMaterial({
+        color: ghostColorHex,
+        dashSize: 1.5,
+        gapSize: 1.0,
+        transparent: true,
+        opacity: 0.5,
+      });
+      const proxLine = new THREE.Line(proxGeom, proxMat);
+      proxLine.visible = false;
+      ghostGroup.add(proxLine);
+
+      const proxSprite = createTextSprite(
+        '',
+        'rgba(15, 23, 42, 0.9)',
+        '#ffffff',
+        isAlert ? '#f87171' : '#facc15'
+      );
+      proxSprite.scale.set(9.5, 2.5, 1);
+      proxSprite.visible = false;
+      ghostGroup.add(proxSprite);
+
+      ghostMeshes.set(neighbor.session_id, {
+        mesh: ghostModel,
+        line: ghostLine,
+        dropLine: ghostDropLine,
+        sprite: ghostSprite,
+        proxLine,
+        proxSprite,
+        neighbor,
+      });
+    });
+  }
+
+  // Create 3D Stylized Ghost Aircraft Model (Holographic translucent silhouette)
+  function create3DGhostAircraftModel(colorHex) {
+    const group = new THREE.Group();
+
+    // Fuselage (ethereal translucent)
+    const fuseGeom = new THREE.CylinderGeometry(0.32, 0.42, 3.6, 8);
+    fuseGeom.rotateZ(Math.PI / 2);
+    const fuseMat = new THREE.MeshStandardMaterial({
+      color: colorHex,
+      roughness: 0.2,
+      metalness: 0.8,
+      transparent: true,
+      opacity: 0.45,
+    });
+    const fuse = new THREE.Mesh(fuseGeom, fuseMat);
+    group.add(fuse);
+
+    // Glowing wireframe contour
+    const wireGeom = new THREE.CylinderGeometry(0.34, 0.44, 3.65, 8);
+    wireGeom.rotateZ(Math.PI / 2);
+    const wireMat = new THREE.MeshBasicMaterial({
+      color: colorHex,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.3,
+    });
+    const wire = new THREE.Mesh(wireGeom, wireMat);
+    group.add(wire);
+
+    // Glowing nose cone
+    const noseGeom = new THREE.ConeGeometry(0.35, 1.0, 8);
+    noseGeom.rotateZ(-Math.PI / 2);
+    const noseMat = new THREE.MeshBasicMaterial({
+      color: colorHex,
+      transparent: true,
+      opacity: 0.7,
+    });
+    const nose = new THREE.Mesh(noseGeom, noseMat);
+    nose.position.x = 2.3;
+    group.add(nose);
+
+    // Swept Wings
+    const wingGeom = new THREE.BoxGeometry(1.1, 0.06, 4.0);
+    const wingMat = new THREE.MeshStandardMaterial({
+      color: colorHex,
+      roughness: 0.3,
+      transparent: true,
+      opacity: 0.4,
+    });
+    const wing = new THREE.Mesh(wingGeom, wingMat);
+    wing.position.set(0.2, 0.0, 0);
+    group.add(wing);
+
+    // Tail Fin
+    const tailGeom = new THREE.BoxGeometry(0.75, 1.0, 0.06);
+    const tailMat = new THREE.MeshStandardMaterial({
+      color: colorHex,
+      transparent: true,
+      opacity: 0.5,
+    });
+    const tail = new THREE.Mesh(tailGeom, tailMat);
+    tail.position.set(-1.3, 0.55, 0);
+    group.add(tail);
+
+    group.scale.set(1.3, 1.3, 1.3);
+    return group;
   }
 
   // Render Synchronized Timeline Ribbons & Altitude Chart
