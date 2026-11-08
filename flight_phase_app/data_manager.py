@@ -9,6 +9,7 @@ from typing import Any
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SESSIONS_PATH = WORKSPACE_ROOT / "03-Visualization" / "continuous_sessions.json"
+DEFAULT_NEIGHBORHOOD_PATH = WORKSPACE_ROOT / "03-Visualization" / "neighborhood_index.json"
 DEFAULT_AIRPORTS_PATH = WORKSPACE_ROOT / "data" / "GlobalAirportDatabase.txt"
 
 # Standard known airports in NY/NJ area and Northeast corridor
@@ -50,14 +51,22 @@ class DataManager:
                 pass
         return float(sess.get("t_max", 0)) * 5.0
 
-    def __init__(self, sessions_path: Path | str = DEFAULT_SESSIONS_PATH, airports_path: Path | str = DEFAULT_AIRPORTS_PATH):
+    def __init__(
+        self,
+        sessions_path: Path | str = DEFAULT_SESSIONS_PATH,
+        airports_path: Path | str = DEFAULT_AIRPORTS_PATH,
+        neighborhood_path: Path | str = DEFAULT_NEIGHBORHOOD_PATH,
+    ):
         self.sessions_path = Path(sessions_path)
         self.airports_path = Path(airports_path)
+        self.neighborhood_path = Path(neighborhood_path)
         self._meta: dict[str, Any] = {}
         self._sessions_by_id: dict[str, dict[str, Any]] = {}
         self._aircraft_to_session_ids: dict[str, list[str]] = {}
         self._aircraft_summaries: list[dict[str, Any]] = []
         self._airports: dict[str, dict[str, Any]] = dict(KNOWN_AIRPORTS)
+        self._neighborhoods: dict[str, list[dict[str, Any]]] = {}
+        self._neighborhood_meta: dict[str, Any] = {}
         self._is_loaded = False
 
     def load_data(self) -> None:
@@ -66,6 +75,7 @@ class DataManager:
             return
 
         self._load_airports()
+        self._load_neighborhoods()
 
         if not self.sessions_path.is_file():
             raise FileNotFoundError(f"Continuous sessions file not found at: {self.sessions_path}")
@@ -162,6 +172,33 @@ class DataManager:
         except Exception:
             pass
 
+    def _load_neighborhoods(self) -> None:
+        """Load precomputed spatial-temporal neighborhood index if available."""
+        if self.neighborhood_path.is_file():
+            try:
+                with open(self.neighborhood_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self._neighborhoods = data.get("neighborhoods", {})
+                self._neighborhood_meta = data.get("meta", {})
+                return
+            except Exception:
+                pass
+
+        # If missing or failed, try to generate it
+        try:
+            from importlib.machinery import SourceFileLoader
+            builder_path = WORKSPACE_ROOT / "03-Visualization" / "build_neighborhood_index.py"
+            if builder_path.is_file():
+                mod = SourceFileLoader("build_neighborhood_index", str(builder_path)).load_module()
+                data = mod.compute_neighborhood_index(
+                    sessions_path=self.sessions_path,
+                    output_path=self.neighborhood_path,
+                )
+                self._neighborhoods = data.get("neighborhoods", {})
+                self._neighborhood_meta = data.get("meta", {})
+        except Exception:
+            pass
+
     def get_aircraft_list(self) -> list[dict[str, Any]]:
         """Return list of all aircraft summaries."""
         if not self._is_loaded:
@@ -194,6 +231,11 @@ class DataManager:
                 "end_kind": s.get("end_kind", ""),
                 "src": s.get("src", ""),
                 "dest": s.get("dest", ""),
+                "start_ts": s.get("start_ts", 0.0),
+                "end_ts": s.get("end_ts", 0.0),
+                "start_time_utc": s.get("start_time_utc", ""),
+                "end_time_utc": s.get("end_time_utc", ""),
+                "neighbor_count": len(self._neighborhoods.get(sid, [])),
                 "n_points": s.get("n_points", 0),
                 "t_max": dur,
                 "duration_s": dur,
@@ -255,6 +297,11 @@ class DataManager:
                 "end_kind": s.get("end_kind", ""),
                 "src": src or "",
                 "dest": dest or "",
+                "start_ts": s.get("start_ts", 0.0),
+                "end_ts": s.get("end_ts", 0.0),
+                "start_time_utc": s.get("start_time_utc", ""),
+                "end_time_utc": s.get("end_time_utc", ""),
+                "neighbor_count": len(self._neighborhoods.get(sid, [])),
                 "t_max": dur,
                 "duration_s": dur,
                 "n_points": len(points),
@@ -306,5 +353,110 @@ class DataManager:
             "sessions": result_sessions,
             "bounds": bounds,
             "airports": airports_data,
+        }
+
+    def get_session_neighborhood(
+        self,
+        session_id: str,
+        max_distance_nm: float = 15.0,
+        max_neighbors: int = 15,
+    ) -> dict[str, Any] | None:
+        """Return synchronized neighbor trajectories and aviation separation analysis for a session."""
+        if not self._is_loaded:
+            self.load_data()
+
+        target = self._sessions_by_id.get(session_id)
+        if not target:
+            return None
+
+        target_start_ts = target.get("start_ts", 0.0)
+        target_end_ts = target.get("end_ts", 0.0)
+        target_dur = self._calculate_session_duration_s(target)
+
+        all_neighbors = self._neighborhoods.get(session_id, [])
+        filtered_neighbors = []
+
+        for n in all_neighbors:
+            if n["min_dist_nm"] > max_distance_nm:
+                continue
+            nsid = n["session_id"]
+            nsess = self._sessions_by_id.get(nsid)
+            if not nsess:
+                continue
+
+            rel_start_s = float(n.get("relative_start_s", 0.0))
+            rel_end_s = float(n.get("relative_end_s", 0.0))
+
+            # Synchronize neighbor points into target session timeline:
+            # Target timeline: t=0 is target session start.
+            # Point format: [lon, lat, alt, t_rel_target]
+            n_pts = nsess.get("points", [])
+            synced_points = []
+            for p in n_pts:
+                if len(p) >= 4:
+                    t_rel_target = rel_start_s + float(p[3]) * 5.0
+                    synced_points.append([
+                        round(float(p[0]), 6),
+                        round(float(p[1]), 6),
+                        round(float(p[2]), 1),
+                        round(t_rel_target, 2),
+                    ])
+
+            # Synchronize phase samples into target session timeline
+            synced_phases = []
+            for ps in nsess.get("phase_samples", []):
+                t_ps = rel_start_s + float(ps.get("time_s", 0.0))
+                synced_phases.append({
+                    "time_s": round(t_ps, 2),
+                    "phase": ps.get("phase", "unknown"),
+                    "confidence": ps.get("confidence", 1.0),
+                })
+
+            filtered_neighbors.append({
+                "session_id": nsid,
+                "aircraft": n.get("aircraft", nsess.get("aircraft", "")),
+                "complete_kind": n.get("complete_kind", nsess.get("complete_kind", "")),
+                "src": n.get("src", nsess.get("src", "")),
+                "dest": n.get("dest", nsess.get("dest", "")),
+                "min_dist_nm": float(n.get("min_dist_nm", 0.0)),
+                "vert_diff_ft": float(n.get("vert_diff_ft", 0.0)),
+                "cpa_time_s": float(n.get("cpa_time_s", 0.0)),
+                "overlap_s": float(n.get("overlap_s", 0.0)),
+                "relative_start_s": rel_start_s,
+                "relative_end_s": rel_end_s,
+                "separation_status": n.get("separation_status", "neighborhood"),
+                "separation_label": n.get("separation_label", "Neighborhood"),
+                "n_points": len(synced_points),
+                "points": synced_points,
+                "phase_samples": synced_phases,
+            })
+            if len(filtered_neighbors) >= max_neighbors:
+                break
+
+        return {
+            "target": {
+                "session_id": session_id,
+                "aircraft": target.get("aircraft", ""),
+                "complete_kind": target.get("complete_kind", ""),
+                "src": target.get("src", ""),
+                "dest": target.get("dest", ""),
+                "start_ts": target_start_ts,
+                "end_ts": target_end_ts,
+                "start_time_utc": target.get("start_time_utc", ""),
+                "end_time_utc": target.get("end_time_utc", ""),
+                "duration_s": target_dur,
+            },
+            "aviation_standards": self._neighborhood_meta.get("aviation_standards", {
+                "terminal_separation_lateral_nm": 3.0,
+                "terminal_separation_vertical_ft": 1000.0,
+                "enroute_separation_lateral_nm": 5.0,
+                "enroute_separation_vertical_ft": 2000.0,
+                "surveillance_neighborhood_lateral_nm": max_distance_nm,
+                "surveillance_neighborhood_vertical_ft": 4000.0,
+                "safe_longitudinal_separation_s": 180.0,
+            }),
+            "neighbors_count": len(filtered_neighbors),
+            "total_available_neighbors": len(all_neighbors),
+            "neighbors": filtered_neighbors,
         }
 

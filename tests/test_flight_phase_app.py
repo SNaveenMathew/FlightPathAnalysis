@@ -160,3 +160,87 @@ def test_full_session_duration_a0be05_s1():
     assert last_pt[2] == 0.0
     assert sess["phase_samples"][-1]["phase"] == "ground"
 
+
+def test_session_neighborhood_api(test_client):
+    # Test neighborhood endpoint for session 01013c_S1
+    resp = test_client.get("/api/sessions/01013c_S1/neighborhood?max_distance_nm=15.0&limit=5")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert "target" in data
+    assert data["target"]["session_id"] == "01013c_S1"
+    assert data["target"]["start_ts"] > 0
+    assert "start_time_utc" in data["target"]
+
+    assert "aviation_standards" in data
+    assert data["aviation_standards"]["terminal_separation_lateral_nm"] == 3.0
+    assert data["aviation_standards"]["terminal_separation_vertical_ft"] == 1000.0
+
+    assert "neighbors" in data
+    assert len(data["neighbors"]) > 0
+    neighbor = data["neighbors"][0]
+    assert "session_id" in neighbor
+    assert "aircraft" in neighbor
+    assert "min_dist_nm" in neighbor
+    assert "vert_diff_ft" in neighbor
+    assert "separation_status" in neighbor
+    assert "points" in neighbor
+    assert len(neighbor["points"]) > 0
+    # Fourth point element is relative time to target session start
+    assert len(neighbor["points"][0]) == 4
+
+
+def test_neighborhood_404(test_client):
+    resp = test_client.get("/api/sessions/nonexistent_session_id/neighborhood")
+    assert resp.status_code == 404
+
+
+def test_build_neighborhood_index_module(tmp_path):
+    import sys
+    sys.path.insert(0, "03-Visualization")
+    from build_neighborhood_index import compute_neighborhood_index
+
+    # Create synthetic test sessions
+    test_sessions = {
+        "sessions": [
+            {
+                "id": "T1_S1",
+                "aircraft": "T1",
+                "start_ts": 1000000.0,
+                "complete_kind": "arrival",
+                "src": "",
+                "dest": "JFK",
+                "points": [
+                    [-73.8, 40.6, 2000.0, 0],
+                    [-73.78, 40.64, 500.0, 10],
+                ],
+            },
+            {
+                "id": "T2_S1",
+                "aircraft": "T2",
+                "start_ts": 1000000.0,
+                "complete_kind": "arrival",
+                "src": "",
+                "dest": "JFK",
+                "points": [
+                    [-73.81, 40.61, 2200.0, 0],
+                    [-73.79, 40.65, 600.0, 10],
+                ],
+            },
+        ]
+    }
+    sessions_file = tmp_path / "test_continuous.json"
+    output_file = tmp_path / "test_neighborhood.json"
+    import json
+    with open(sessions_file, "w") as f:
+        json.dump(test_sessions, f)
+
+    res = compute_neighborhood_index(sessions_path=sessions_file, output_path=output_file)
+    assert res["meta"]["total_sessions"] == 2
+    assert "T1_S1" in res["neighborhoods"]
+    assert len(res["neighborhoods"]["T1_S1"]) == 1
+    neighbor = res["neighborhoods"]["T1_S1"][0]
+    assert neighbor["session_id"] == "T2_S1"
+    assert neighbor["min_dist_nm"] < 3.0
+    assert neighbor["separation_status"] == "alert"
+

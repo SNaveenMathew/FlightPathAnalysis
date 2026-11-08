@@ -113,6 +113,22 @@ def get_sessions_batch(req: BatchSessionsRequest) -> dict[str, Any]:
     return data
 
 
+@app.get("/api/sessions/{session_id}/neighborhood")
+def get_session_neighborhood(
+    session_id: str,
+    max_distance_nm: float = Query(15.0, description="Maximum CPA distance in nautical miles"),
+    limit: int = Query(15, description="Maximum number of neighbor flights to return"),
+) -> dict[str, Any]:
+    neighborhood = data_manager.get_session_neighborhood(
+        session_id=session_id,
+        max_distance_nm=max_distance_nm,
+        max_neighbors=limit,
+    )
+    if not neighborhood:
+        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
+    return neighborhood
+
+
 @app.get("/api/tags")
 def get_tags(
     session_id: str | None = Query(None),

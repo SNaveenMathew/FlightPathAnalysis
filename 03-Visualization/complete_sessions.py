@@ -971,6 +971,8 @@ def continuous_sessions_to_payload(
                 index=False, name=None
             )
         ]
+        start_ts = float(group["ts"].min()) if "ts" in group.columns and group["ts"].notna().any() else 0.0
+        end_ts = float(group["ts"].max()) if "ts" in group.columns and group["ts"].notna().any() else 0.0
         sessions.append(
             {
                 "id": str(session_id),
@@ -991,6 +993,10 @@ def continuous_sessions_to_payload(
                 "src": None if pd.isna(metadata["src"]) else str(metadata["src"]),
                 "dest": None if pd.isna(metadata["dest"]) else str(metadata["dest"]),
                 "quality": _quality_payload(metadata),
+                "start_ts": start_ts,
+                "end_ts": end_ts,
+                "start_time_utc": pd.to_datetime(start_ts, unit="ms").isoformat() if start_ts else "",
+                "end_time_utc": pd.to_datetime(end_ts, unit="ms").isoformat() if end_ts else "",
                 "t_max": int(points[-1][3]) if points else 0,
                 "n_points": len(points),
                 "points": points,
