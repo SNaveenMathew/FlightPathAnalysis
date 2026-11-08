@@ -68,7 +68,18 @@ prerequisites or alternatives.
    flag is false at each track-segment start and true only when the current
    estimated label differs from its prior sample in that segment.
 
-5. **Interactive Flight Phase Explorer & Manual Tagging Studio:**
+5. **Spatial-Temporal Neighborhood Indexing (FAA Air Traffic Separation):**
+   Run:
+   ```bash
+   conda run -n flight_path python 03-Visualization/build_neighborhood_index.py
+   ```
+   Reads `continuous_sessions.json`, indexes all concurrent flights across the 48-hour dataset in 4D space-time, and builds the intermediate `neighborhood_index.json`. Grounded in FAA / ICAO air traffic control standards:
+   - **Terminal Radar Separation:** 3.0 NM lateral, 1,000 ft vertical (FAA Order JO 7110.65). Flags loss of separation alerts.
+   - **En-route / Traffic Advisory:** 5.0 NM lateral, 2,000 ft vertical proximity caution envelope.
+   - **Safe Longitudinal Separation:** <= 180 s (3 minutes) in-trail spacing for flights along the same approach/departure corridor.
+   - **Airspace Surveillance Neighborhood:** 15.0 NM lateral, 4,000 ft vertical envelope.
+
+6. **Interactive Flight Phase Explorer & Manual Tagging Studio:**
    Launch the dedicated interactive application with:
    ```bash
    conda run -n flight_path python run_app.py
@@ -79,10 +90,11 @@ prerequisites or alternatives.
    - **Choose an Aircraft:** Search and pick any aircraft (e.g. `a387f0`, `a0be05`).
    - **Select Sessions:** Defaults to all sessions of the aircraft automatically; toggle individual sessions on/off to compare or isolate specific flights.
    - **Animate Predicted Phases in 3D:** Watch the aircraft traverse its trajectory in an interactive 3D WebGL scene preserving the radar look and feel. Starts in top-down `(lon, lat)` planar view and smoothly rotates/orbits into 3D to inspect the vertical altitude dimension, with synchronized altitude profile and telemetry.
+   - **4D Neighborhood "Ghost" Traffic Animation:** Click on any aircraft or trajectory in 3D to reveal its concurrent neighborhood. Neighbor flights flying at the same real-world time are rendered as animated "ghosts" (translucent holographic models with dashed trajectory ribbons). Real-time 3D proximity vectors display live separation in NM and vertical altitude difference, with dynamic visual alerts when standard FAA separation minimums (<3 NM & <1,000 ft) are breached.
    - **Manual Phase Tagging:** Select time ranges by clicking/dragging on the timeline or using `[` and `]`, assign manual phase labels (`ground`, `initial_climb`, `climb`, `cruise`, `level_flight`, `descent`, `approach`, `landing`, `landing_roll`, `go_around_climb_candidate`, `airborne_transition`), and save rationale notes.
    - **Model Refinement & Evaluation:** Open the in-app *Refinement & Report* modal or run `python evaluate_manual_tags.py` to evaluate agreement rate, inspect confusion matrices, and view concrete recommendations for tuning heuristic thresholds in `02-Preprocessing/flight_phase.py`.
 
-6. **View static route templates (Alternative legacy viewers):** from `03-Visualization/`, start
+7. **View static route templates (Alternative legacy viewers):** from `03-Visualization/`, start
    `python -m http.server 8765`, then open either:
    - <http://127.0.0.1:8765/02-session_space_viz.html> for discretized
      `(x, y, z, t)`.
