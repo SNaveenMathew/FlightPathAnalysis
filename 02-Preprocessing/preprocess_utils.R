@@ -58,7 +58,7 @@ annotate_track_quality <- function(ac_df,
     stop("ac_df must contain aircraft and ts columns")
   }
 
-  out <- data.table::copy(data.table::as.data.table(ac_df))
+  out <- if (data.table::is.data.table(ac_df)) ac_df else data.table::as.data.table(ac_df)
   for (column in c("lon", "lat", "altitude_raw_ft", "altitude", "ground_speed")) {
     if (!column %in% names(out)) out[, (column) := NA_real_]
   }
@@ -68,10 +68,15 @@ annotate_track_quality <- function(ac_df,
   } else {
     "altitude"
   }
-  out[, .qc_ts_ms := suppressWarnings(as.numeric(as.character(ts)))]
-  out[, .qc_lon := suppressWarnings(as.numeric(as.character(lon)))]
-  out[, .qc_lat := suppressWarnings(as.numeric(as.character(lat)))]
-  out[, .qc_alt_ft := suppressWarnings(as.numeric(as.character(get(altitude_column))))]
+  to_num <- function(x) {
+    if (is.numeric(x)) as.numeric(x)
+    else if (is.factor(x)) suppressWarnings(as.numeric(as.character(x)))
+    else suppressWarnings(as.numeric(x))
+  }
+  out[, .qc_ts_ms := to_num(ts)]
+  out[, .qc_lon := to_num(lon)]
+  out[, .qc_lat := to_num(lat)]
+  out[, .qc_alt_ft := to_num(get(altitude_column))]
   out[, .qc_ground := !is.na(ground_flag) & as.logical(ground_flag)]
   out[.qc_ground & !is.finite(.qc_alt_ft), .qc_alt_ft := 0]
 
@@ -173,9 +178,7 @@ annotate_touchdown_segments <- function(ac_df) {
     stop("ac_df must contain altitude_phase_ft or altitude")
   }
 
-  out <- data.table::copy(data.table::as.data.table(ac_df))
-  out[, .touchdown_ts_ms := suppressWarnings(as.numeric(as.character(ts)))]
-  data.table::setorderv(out, c("aircraft", ".touchdown_ts_ms"), na.last = TRUE)
+  out <- if (data.table::is.data.table(ac_df)) ac_df else data.table::as.data.table(ac_df)
   out[, .touchdown_event := !is.na(touchdown) & as.logical(touchdown)]
   out[, touchdown_id := cumsum(.touchdown_event), by = aircraft]
   out[, touchdown_leg_id := touchdown_id - as.integer(.touchdown_event), by = aircraft]
@@ -184,7 +187,7 @@ annotate_touchdown_segments <- function(ac_df) {
     max(get(altitude_column), na.rm = TRUE)
   ), by = .(aircraft, touchdown_leg_id)]
   out[!is.finite(max_alt_touchdown_seg), max_alt_touchdown_seg := NA_real_]
-  out[, c(".touchdown_ts_ms", ".touchdown_event") := NULL]
+  out[, c(".touchdown_event") := NULL]
   out
 }
 
